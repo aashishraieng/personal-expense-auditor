@@ -17,6 +17,22 @@ MERCHANT_CATEGORY_MAP = {
     "Google": "UPI Service",
     "SBI": "Bank",
 }
+SUBCATEGORY_KEYWORDS = {
+    "Food Delivery": ["swiggy", "zomato", "dominos", "pizza hut", "eats"],
+    "Travel": ["uber", "ola", "rapido", "meru", "irctc", "redbus", "makemytrip", "yxigo", "indigo", "vistara", "goair"],
+    "Shopping": ["amazon", "flipkart", "ajio", "meesho", "myntra", "nykaa", "bigbasket", "jiomart"],
+    "Recharge": ["airtel", "jio", "vi", "vodafone", "bsnl recharge", "mobile recharge"],
+    "Bills": ["electricity", "water bill", "gas bill", "power bill", "billdesk"],
+    "Petrol": ["petrol", "fuel", "bharat petroleum", "indian oil", "hpcl"],
+    "Subscription": ["netflix", "prime", "spotify", "hotstar", "sonyliv", "crunchyroll"],
+    "EMI": ["emi", "loan installment", "hdfc loan", "axis loan", "icici loan"],
+    "Education": ["college fee", "tuition", "coaching"],
+    "Toll": ["fastag", "highway toll", "nhai", "toll plaza"],
+    "ATM Withdrawal": ["atm withdrawal", "cash withdrawal"],
+    "Bank Charges": ["late fee", "bank charges", "service charge", "penalty", "processing fee"]
+}
+
+
 
 # ---------- Amount extraction ----------
 def extract_amount(text: str):
@@ -63,28 +79,48 @@ def extract_date(text: str):
 def categorize_transaction(text: str, amount: float, merchant: str) -> str:
     t = text.lower()
 
-    # 1) Refund / reversal (highest priority)
+    # Refund-related
     if "reversal" in t or "refunded" in t or "refund" in t or "reversed" in t:
         return "Refund"
 
-    # 2) Wallet / app balance credit (also refund)
+    # Wallet / balance credit = refund
     if "credited" in t and ("balance" in t or "wallet" in t):
         return "Refund"
 
-    # 3) Outgoing money (expense): debited / sent / paid
-    if "debited" in t or "sent from" in t or "payment of" in t or "payment made" in t or "paid to" in t or "upi payment" in t:
-        return "Expense"
+    # Cashback
+    if "cashback" in t:
+        return "Refund"
 
-    # 4) General incoming credit (salary / transfer etc.)
+    # Salary
+    if "salary" in t or "credited as salary" in t:
+        return "Incoming"
+
+    # Incoming (transfer)
     if "credited" in t or "credit of" in t or "received from" in t:
         return "Incoming"
 
-    # 5) Fallback: merchant-based type (we'll refine later)
-    if merchant in MERCHANT_CATEGORY_MAP:
-        return MERCHANT_CATEGORY_MAP[merchant]
+    # Expense (bank debits)
+    if "debited" in t or "sent from" in t or "paid to" in t or "payment made" in t or "upi payment" in t or "payment of" in t:
+        return "Expense"
 
-    # 6) Default
     return "Other"
+
+
+
+def get_subcategory(text: str, merchant: str, category: str) -> str:
+    if category != "Expense":
+        return "None"  # Only expenses get sub-categories
+
+    t = text.lower()
+
+    for subcat, keywords in SUBCATEGORY_KEYWORDS.items():
+        for word in keywords:
+            if word.lower() in t:
+                return subcat
+
+    return "Other Expense"
+
+
 EXPENSE_LIKE_CATEGORIES = {
     "Expense",
     "Food",
@@ -138,15 +174,18 @@ def process_all_sms(input_dir: Path, output_csv: Path):
                 if amount is not None:
                     category = categorize_transaction(text, amount, merchant)
                     flow = derive_flow(category)
+                    sub_category = get_subcategory(text, merchant, category)
 
                     rows.append({
                         "source_text": text,
                         "amount": amount,
                         "merchant": merchant,
                         "category": category,
+                        "sub_category": sub_category,
                         "flow": flow,
                         "date": date
                     })
+
 
 
 
@@ -160,7 +199,8 @@ def process_all_sms(input_dir: Path, output_csv: Path):
     with output_csv.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(
     f,
-    fieldnames=["source_text", "amount", "merchant", "category", "flow", "date"]
+    fieldnames=["source_text", "amount", "merchant", "category", "sub_category", "flow", "date"]
+
 )
 
         writer.writeheader()

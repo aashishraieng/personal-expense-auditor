@@ -1,6 +1,7 @@
-source_text,amount,merchant,category,flow,date
-"Dear SBI UPI User, ur A/cX8742 credited with Rs1800 on 02Dec25 against reversal of txn (Ref no 533683850010)",1800.0,Unknown,Refund,REFUND,2025-12-02
-Rs.176 credited to your Meesho Balance. Updated Balance Rs.176. Statement https://www.meesho.com/,176.0,Meesho,Refund,REFUND,Unknown
-A/c *6100 Credited for Rs:185.00 on 03-11-2025 10:03:18 by Mob Bk ref no 886905138225 Avl Bal Rs:2281.98.Never Share OTP/PIN/CVV-Union Bank of India,185.0,Unknown,Incoming,IN,2025-11-03
-Rs. 74 sent from a/c xx6801 on 21-Nov-25 to TARSEM KAUR (UPI Ref: 532548476365). Not you? Call 080-4832-9999 - slice,74.0,Unknown,Expense,OUT,2025-11-21
-"A/c *6100 Debited for Rs:500.00 on 23-11-2025 19:32:07 by Mob Bk ref no 532776066676 Avl Bal Rs:2401.98.If not you, Call 1800222243 -Union Bank of India",500.0,Unknown,Expense,OUT,2025-11-23
+source_text,amount,merchant,category,sub_category,flow,date
+"Dear SBI UPI User, ur A/cX8742 credited with Rs1800 on 02Dec25 against reversal of txn (Ref no 533683850010)",1800.0,Unknown,Refund,None,REFUND,2025-12-02
+Rs.176 credited to your Meesho Balance. Updated Balance Rs.176. Statement https://www.meesho.com/,176.0,Meesho,Refund,None,REFUND,Unknown
+A/c *6100 Credited for Rs:185.00 on 03-11-2025 10:03:18 by Mob Bk ref no 886905138225 Avl Bal Rs:2281.98.Never Share OTP/PIN/CVV-Union Bank of India,185.0,Unknown,Incoming,None,IN,2025-11-03
+Rs. 74 sent from a/c xx6801 on 21-Nov-25 to TARSEM KAUR (UPI Ref: 532548476365). Not you? Call 080-4832-9999 - slice,74.0,Unknown,Expense,Other Expense,OUT,2025-11-21
+"A/c *6100 Debited for Rs:500.00 on 23-11-2025 19:32:07 by Mob Bk ref no 532776066676 Avl Bal Rs:2401.98.If not you, Call 1800222243 -Union Bank of India",500.0,Unknown,Expense,Other Expense,OUT,2025-11-23
+"Rs. 1,400 received in slice bank account xx6801 on 23-Nov-25 from Durgesh Rai (UPI Ref: 532747757900) - slice",1.0,Unknown,Other,None,OTHER,2025-11-23
