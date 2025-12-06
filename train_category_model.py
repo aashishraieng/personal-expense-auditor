@@ -8,7 +8,9 @@ from sklearn.pipeline import Pipeline
 from sklearn.metrics import classification_report
 
 # 1) Load labeled dataset
-df = pd.read_csv("dataset_labeled.csv")
+df = pd.read_csv("data/processed/training_dataset.csv", encoding="ISO-8859-1")
+
+
 
 # Keep only needed columns
 df = df[["source_text", "category"]].dropna()
