@@ -1,57 +1,68 @@
 import os
 import json
+from datetime import datetime
+
 import pandas as pd
-from flask import Flask, request, render_template_string, redirect, url_for, flash, jsonify
+from flask import (
+    Flask,
+    request,
+    render_template_string,
+    redirect,
+    url_for,
+    flash,
+    jsonify,
+)
 from flask_cors import CORS
+
 from import_android_sms import parse_android_sms_xml
 from analyze_sms_file import classify_sms_file
 from summarize_expenses import summarize_with_amounts
-from datetime import datetime
-from db import SessionLocal, init_db, SMSMessage
+from db import SessionLocal, init_db, SMSMessage, User
+from auth_utils import hash_password, verify_password, make_token
 
+# -----------------------------------------------------------------------------
+# Flask app setup
+# -----------------------------------------------------------------------------
 app = Flask(__name__)
-CORS(app) # Enable CORS for all routes
+CORS(app)  # Enable CORS for all routes
 app.secret_key = "dev-secret-key"  # needed for flash messages; change later
 init_db()
 
-# Folder to store uploaded files
+# -----------------------------------------------------------------------------
+# Paths / constants
+# -----------------------------------------------------------------------------
 UPLOAD_FOLDER = os.path.join("data", "raw")
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
 SUMMARY_JSON = os.path.join("data", "processed", "web_summary.json")
 CORRECTIONS_CSV = os.path.join("data", "processed", "corrections_web.csv")
 
-
 ALLOWED_EXTENSIONS = {"xml", "csv"}
-def load_amounts_df():
-    """
-    Load the amounts CSV (auto_dataset_amounts_web.csv) and return:
-    - df (with parsed date column if present)
-    - list of available months as strings 'YYYY-MM'
-    """
-    csv_path = os.path.join("data", "processed", "auto_dataset_amounts_web.csv")
-    if not os.path.exists(csv_path):
-        return None, []
 
-    try:
-        df = pd.read_csv(csv_path, encoding="ISO-8859-1")
-    except Exception as e:
-        print("[LOAD AMOUNTS][READ ERROR]", e)
-        return None, []
+# -----------------------------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------------------------
+def allowed_file(filename: str) -> bool:
+    return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
-    if "date" in df.columns:
-        df["date"] = pd.to_datetime(df["date"], errors="coerce")
-        df = df.dropna(subset=["date"])
-        df["year_month"] = df["date"].dt.to_period("M").astype(str)
-        months = sorted(df["year_month"].unique().tolist())
-    else:
-        df["year_month"] = ""
-        months = []
 
-    return df, months
-def sync_amounts_csv_to_db():
+def load_summary():
+    if os.path.exists(SUMMARY_JSON):
+        try:
+            with open(SUMMARY_JSON, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return data
+        except Exception as e:
+            print("[SUMMARY][LOAD][ERROR]", e)
+    return None
+
+
+def sync_amounts_csv_to_db(user_id: int):
     """
-    Read auto_dataset_amounts_web.csv and replace contents of sms_messages table.
-    This keeps DB in sync with latest processed SMS data.
+    Read auto_dataset_amounts_web.csv and insert ONLY NEW rows for this user
+    into sms_messages table.
+
+    "New" is defined as (same user_id, text, amount, date) not already present.
     """
     csv_path = os.path.join("data", "processed", "auto_dataset_amounts_web.csv")
     if not os.path.exists(csv_path):
@@ -71,11 +82,20 @@ def sync_amounts_csv_to_db():
 
     session = SessionLocal()
     try:
-        # Clear old data
-        deleted = session.query(SMSMessage).delete()
-        print(f"[SYNC DB] Deleted {deleted} old rows from sms_messages.")
+        # Existing rows for this user
+        existing = session.query(SMSMessage).filter(
+            SMSMessage.user_id == user_id
+        ).all()
 
-        # Insert new data
+        existing_keys = set()
+        for msg in existing:
+            key = (
+                msg.text,
+                float(msg.amount or 0.0),
+                msg.date.date().isoformat() if msg.date else None,
+            )
+            existing_keys.add(key)
+
         count = 0
         for _, row in df.iterrows():
             try:
@@ -86,30 +106,37 @@ def sync_amounts_csv_to_db():
                     except Exception:
                         dt = None
 
-                # Use row_id from CSV as the primary key ID in DB (if present)
-                rid = None
-                try:
-                    rid = int(row.get("row_id"))
-                except Exception:
-                    rid = None  # DB will autoincrement if this is None
+                amt = float(row.get("amount", 0.0))
+                text = str(row["source_text"])
+                cat = str(row.get("predicted_category", "Other"))
+
+                key = (
+                    text,
+                    amt,
+                    dt.date().isoformat() if dt is not None else None,
+                )
+
+                if key in existing_keys:
+                    # Already stored for this user → skip
+                    continue
 
                 msg = SMSMessage(
-                    id=rid,
+                    user_id=user_id,
                     date=dt,
-                    text=str(row["source_text"]),
-                    amount=float(row.get("amount", 0.0)),
-                    category=str(row.get("predicted_category", "Other")),
+                    text=text,
+                    amount=amt,
+                    category=cat,
                     corrected=False,
                 )
                 session.add(msg)
+                existing_keys.add(key)
                 count += 1
+
             except Exception as e:
                 print("[SYNC DB] Skipped row:", e)
 
-
         session.commit()
-        print(f"[SYNC DB] Inserted {count} rows into sms_messages.")
-
+        print(f"[SYNC DB] Inserted {count} NEW rows for user_id={user_id}.")
     except Exception as e:
         session.rollback()
         print("[SYNC DB] DB error:", e)
@@ -117,10 +144,55 @@ def sync_amounts_csv_to_db():
         session.close()
 
 
-def allowed_file(filename: str) -> bool:
-    return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
+def get_user_id_from_request():
+    """
+    Read token from Authorization header and map it to user_id
+    using data/tokens.json created at login.
+    Returns user_id (int) or None if invalid/missing.
+    """
+    auth_header = request.headers.get("Authorization", "").strip()
+    if not auth_header:
+        return None
 
-# Simple HTML template for testing upload in browser
+    # Expect "Bearer <token>" or just "<token>"
+    if auth_header.lower().startswith("bearer "):
+        token = auth_header[7:].strip()
+    else:
+        token = auth_header
+
+    tokens_file = os.path.join("data", "tokens.json")
+    if not os.path.exists(tokens_file):
+        return None
+
+    try:
+        with open(tokens_file, "r") as f:
+            tokens = json.load(f)
+    except Exception:
+        return None
+
+    user_id = tokens.get(token)
+    return user_id
+
+
+def _get_months_for_user(session, user_id: int):
+    """
+    Return sorted list of 'YYYY-MM' strings where this user has dated messages.
+    """
+    dates = (
+        session.query(SMSMessage.date)
+        .filter(SMSMessage.user_id == user_id, SMSMessage.date.isnot(None))
+        .all()
+    )
+    ym = set()
+    for (dt,) in dates:
+        if dt:
+            ym.add(dt.strftime("%Y-%m"))
+    return sorted(ym)
+
+
+# -----------------------------------------------------------------------------
+# HTML upload page (for manual testing in browser)
+# -----------------------------------------------------------------------------
 UPLOAD_PAGE = """
 <!doctype html>
 <html>
@@ -177,15 +249,246 @@ UPLOAD_PAGE = """
   </body>
 </html>
 """
-def load_summary():
-    if os.path.exists(SUMMARY_JSON):
+
+# -----------------------------------------------------------------------------
+# Auth routes
+# -----------------------------------------------------------------------------
+@app.route("/auth/signup", methods=["POST"])
+def signup():
+    data = request.json or {}
+    email = data.get("email", "").strip().lower()
+    password = data.get("password", "")
+
+    if not email or not password:
+        return jsonify({"error": "missing_fields"}), 400
+
+    session = SessionLocal()
+    try:
+        existing = session.query(User).filter_by(email=email).first()
+        if existing:
+            return jsonify({"error": "email_exists"}), 409
+
+        user = User(
+            email=email,
+            password_hash=hash_password(password),
+        )
+        session.add(user)
+        session.commit()
+
+        return jsonify({"status": "ok"})
+    except Exception as e:
+        print("[SIGNUP ERROR]", e)
+        session.rollback()
+        return jsonify({"error": "server"}), 500
+    finally:
+        session.close()
+
+
+@app.route("/auth/login", methods=["POST"])
+def login():
+    data = request.json or {}
+    email = data.get("email", "").strip().lower()
+    password = data.get("password", "")
+
+    session = SessionLocal()
+    try:
+        user = session.query(User).filter_by(email=email).first()
+        if not user or not verify_password(password, user.password_hash):
+            return jsonify({"error": "invalid_credentials"}), 401
+
+        token = make_token()
+
+        tokens_file = os.path.join("data", "tokens.json")
+        os.makedirs("data", exist_ok=True)
+        if os.path.exists(tokens_file):
+            tokens = json.load(open(tokens_file))
+        else:
+            tokens = {}
+
+        tokens[token] = user.id
+        json.dump(tokens, open(tokens_file, "w"))
+
+        return jsonify({"status": "ok", "token": token})
+    except Exception as e:
+        print("[LOGIN ERROR]", e)
+        return jsonify({"error": "server"}), 500
+    finally:
+        session.close()
+
+
+@app.route("/auth/me", methods=["GET"])
+def auth_me():
+    """
+    Return basic info about the currently authenticated user.
+    Requires Authorization: Bearer <token> header.
+    """
+    user_id = get_user_id_from_request()
+    if not user_id:
+        return jsonify({"error": "unauthorized"}), 401
+
+    session = SessionLocal()
+    try:
+        user = session.get(User, user_id)
+        if not user:
+            return jsonify({"error": "unauthorized"}), 401
+
+        return jsonify(
+            {
+                "id": user.id,
+                "email": user.email,
+                "created_at": user.created_at.isoformat()
+                if user.created_at
+                else None,
+            }
+        )
+    except Exception as e:
+        print("[AUTH ME ERROR]", e)
+        return jsonify({"error": "server"}), 500
+    finally:
+        session.close()
+
+
+# -----------------------------------------------------------------------------
+# API routes
+# -----------------------------------------------------------------------------
+@app.route("/api/summary", methods=["GET"])
+def api_summary():
+    """
+    Return summary (spent/income/net + category totals) for the current user.
+    Optional: month=YYYY-MM filter.
+    """
+    user_id = get_user_id_from_request()
+    if not user_id:
+        user_id = 1  # default single-user mode
+
+    month = request.args.get("month")
+
+    session = SessionLocal()
+    try:
+        q = session.query(SMSMessage).filter(
+            SMSMessage.user_id == user_id,
+            SMSMessage.amount.isnot(None),
+            SMSMessage.amount > 0,
+        )
+
+        if month:
+            try:
+                year, mon = month.split("-")
+                q = q.filter(
+                    SMSMessage.date.isnot(None),
+                    SMSMessage.date.like(f"{year}-{mon}-%"),
+                )
+            except Exception:
+                pass
+
+        rows = q.all()
+
+        if not rows:
+            months_available = _get_months_for_user(session, user_id)
+            return jsonify(
+                {
+                    "total_spent": 0.0,
+                    "total_income": 0.0,
+                    "net": 0.0,
+                    "category_totals": {},
+                    "months_available": months_available,
+                }
+            )
+
+        category_totals = {}
+        for msg in rows:
+            cat = msg.category
+            amt = float(msg.amount or 0.0)
+            category_totals[cat] = category_totals.get(cat, 0.0) + amt
+
+        spent = 0.0
+        income = 0.0
+        for cat, amt in category_totals.items():
+            if cat in ["Debit", "Shopping/UPI"]:
+                spent += amt
+            elif cat in ["Credit", "Refund"]:
+                income += amt
+
+        months_available = _get_months_for_user(session, user_id)
+
+        return jsonify(
+            {
+                "total_spent": float(spent),
+                "total_income": float(income),
+                "net": float(income - spent),
+                "category_totals": category_totals,
+                "months_available": months_available,
+            }
+        )
+    except Exception as e:
+        print("[API SUMMARY][DB ERROR]", e)
+        return jsonify({"error": "db_error"}), 500
+    finally:
+        session.close()
+
+
+@app.route("/api/transactions", methods=["GET"])
+def api_transactions():
+    """
+    Return recent transactions for current user from SQLite (sms_messages),
+    optionally filtered by month=YYYY-MM.
+    """
+    user_id = get_user_id_from_request()
+    if not user_id:
+        user_id = 1  # default user until frontend sends token
+
+    session = SessionLocal()
+    try:
+        month = request.args.get("month")
+
+        query = session.query(SMSMessage).filter(
+            SMSMessage.user_id == user_id,
+            SMSMessage.amount.isnot(None),
+            SMSMessage.amount > 0,
+        )
+
+        if month:
+            try:
+                year, mon = month.split("-")
+                query = query.filter(
+                    SMSMessage.date.isnot(None),
+                    SMSMessage.date.like(f"{year}-{mon}-%"),
+                )
+            except Exception:
+                pass
+
+        query = query.order_by(
+            SMSMessage.date.desc().nullslast(), SMSMessage.id.desc()
+        )
+
         try:
-            with open(SUMMARY_JSON, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                return data
-        except Exception as e:
-            print("[SUMMARY][LOAD][ERROR]", e)
-    return None
+            limit = int(request.args.get("limit", "50"))
+        except ValueError:
+            limit = 50
+
+        rows = query.limit(limit).all()
+
+        items = []
+        for msg in rows:
+            items.append(
+                {
+                    "id": msg.id,
+                    "date": msg.date.isoformat(sep=" ") if msg.date else "",
+                    "text": msg.text,
+                    "category": msg.category,
+                    "amount": float(msg.amount or 0.0),
+                }
+            )
+
+        months_available = _get_months_for_user(session, user_id)
+
+        return jsonify({"items": items, "months_available": months_available})
+    except Exception as e:
+        print("[API TRANSACTIONS][DB ERROR]", e)
+        return jsonify({"error": "db_error"}), 500
+    finally:
+        session.close()
+
 
 @app.route("/api/transactions/<int:row_id>", methods=["PATCH"])
 def api_update_transaction(row_id: int):
@@ -199,8 +502,12 @@ def api_update_transaction(row_id: int):
     if not new_category:
         return jsonify({"error": "missing_category"}), 400
 
-    classified_csv = os.path.join("data", "processed", "auto_dataset_classified_web.csv")
-    amounts_csv = os.path.join("data", "processed", "auto_dataset_amounts_web.csv")
+    classified_csv = os.path.join(
+        "data", "processed", "auto_dataset_classified_web.csv"
+    )
+    amounts_csv = os.path.join(
+        "data", "processed", "auto_dataset_amounts_web.csv"
+    )
 
     if not os.path.exists(classified_csv):
         return jsonify({"error": "no_classified_data"}), 404
@@ -214,7 +521,6 @@ def api_update_transaction(row_id: int):
     if "row_id" not in df.columns:
         return jsonify({"error": "no_row_id_column"}), 500
 
-    # Find the row by row_id
     match = df.index[df["row_id"] == row_id]
     if len(match) == 0:
         return jsonify({"error": "row_not_found"}), 404
@@ -227,21 +533,17 @@ def api_update_transaction(row_id: int):
     if old_category == new_category:
         return jsonify({"message": "no_change"}), 200
 
-    # Update category in classified CSV
     df.loc[idx, "predicted_category"] = new_category
 
     try:
         df.to_csv(classified_csv, index=False, encoding="ISO-8859-1")
 
-        # Recompute amounts + summary from updated classified CSV
         summary = summarize_with_amounts(classified_csv, amounts_csv)
 
-        # Save updated summary JSON
         os.makedirs(os.path.dirname(SUMMARY_JSON), exist_ok=True)
         with open(SUMMARY_JSON, "w", encoding="utf-8") as f:
             json.dump(summary, f)
 
-        # Log correction for future retraining
         corr_row = {
             "row_id": row_id,
             "timestamp": datetime.utcnow().isoformat(),
@@ -262,77 +564,24 @@ def api_update_transaction(row_id: int):
         print("[API TX PATCH][WRITE ERROR]", e)
         return jsonify({"error": "update_failed", "details": str(e)}), 500
 
-    return jsonify({
-        "message": "updated",
-        "row_id": row_id,
-        "old_category": old_category,
-        "new_category": new_category,
-        "summary": summary,
-    })
-
-@app.route("/api/summary", methods=["GET"])
-def api_summary():
-    """
-    If no month is specified: return overall summary from summary JSON (if exists),
-    plus list of available months.
-    If month=YYYY-MM is specified: compute summary for that month from amounts CSV.
-    """
-    month = request.args.get("month")
-
-    df, months_available = load_amounts_df()
-
-    # If a specific month is requested and we have data
-    if month and df is not None:
-        df_month = df[df["year_month"] == month].copy()
-        if df_month.empty:
-            return jsonify({
-                "total_spent": 0.0,
-                "total_income": 0.0,
-                "net": 0.0,
-                "category_totals": {},
-                "months_available": months_available,
-            })
-
-        # Compute category totals
-        cat_totals = df_month.groupby("predicted_category")["amount"].sum().to_dict()
-
-        spend = df_month[df_month["predicted_category"].isin(["Debit", "Shopping/UPI"])]["amount"].sum()
-        income = df_month[df_month["predicted_category"].isin(["Credit", "Refund"])]["amount"].sum()
-
-        return jsonify({
-            "total_spent": float(spend),
-            "total_income": float(income),
-            "net": float(income - spend),
-            "category_totals": cat_totals,
-            "months_available": months_available,
-        })
-
-    # No specific month requested: use overall summary JSON if available
-    data = load_summary()
-    if not data:
-        # Fallback: compute from df if we have it
-        if df is None:
-            return jsonify({"error": "no_data"}), 404
-
-        cat_totals = df.groupby("predicted_category")["amount"].sum().to_dict()
-        spend = df[df["predicted_category"].isin(["Debit", "Shopping/UPI"])]["amount"].sum()
-        income = df[df["predicted_category"].isin(["Credit", "Refund"])]["amount"].sum()
-
-        data = {
-            "category_totals": cat_totals,
-            "total_spent": float(spend),
-            "total_income": float(income),
-            "net": float(income - spend),
+    return jsonify(
+        {
+            "message": "updated",
+            "row_id": row_id,
+            "old_category": old_category,
+            "new_category": new_category,
+            "summary": summary,
         }
-
-    # Always attach months_available
-    data["months_available"] = months_available
-    return jsonify(data)
-
+    )
 
 
 @app.route("/api/upload", methods=["POST"])
 def api_upload():
+    # Try to get user_id from token; fallback to 1 for now if not logged in
+    user_id = get_user_id_from_request()
+    if not user_id:
+        user_id = 1
+
     if "file" not in request.files:
         return jsonify({"error": "no_file"}), 400
 
@@ -351,104 +600,44 @@ def api_upload():
     result_summary = None
 
     if filename.lower().endswith(".xml"):
-        output_csv = os.path.join("data", "processed", "auto_dataset_from_sms_web.csv")
+        output_csv = os.path.join(
+            "data", "processed", "auto_dataset_from_sms_web.csv"
+        )
         try:
             parse_android_sms_xml(save_path, output_csv)
 
-            classified_csv = os.path.join("data", "processed", "auto_dataset_classified_web.csv")
-            summarized_csv = os.path.join("data", "processed", "auto_dataset_amounts_web.csv")
+            classified_csv = os.path.join(
+                "data", "processed", "auto_dataset_classified_web.csv"
+            )
+            summarized_csv = os.path.join(
+                "data", "processed", "auto_dataset_amounts_web.csv"
+            )
 
             classify_sms_file(output_csv, classified_csv)
-            result_summary = summarize_with_amounts(classified_csv, summarized_csv)
+            result_summary = summarize_with_amounts(
+                classified_csv, summarized_csv
+            )
 
-            # Save summary JSON for /api/summary and HTML page
             os.makedirs(os.path.dirname(SUMMARY_JSON), exist_ok=True)
             with open(SUMMARY_JSON, "w", encoding="utf-8") as f:
                 json.dump(result_summary, f)
-            # After summarizing, sync CSV -> DB so API uses fresh data
-            sync_amounts_csv_to_db()
 
-
+            # Sync CSV -> DB for THIS user only
+            sync_amounts_csv_to_db(user_id)
         except Exception as e:
             print("[API UPLOAD][ERROR]", e)
-            return jsonify({"error": "processing_failed", "details": str(e)}), 500
+            return jsonify(
+                {"error": "processing_failed", "details": str(e)}
+            ), 500
     else:
-        # CSV branch – for now we just save it
         result_summary = None
 
-    return jsonify({
-        "message": "uploaded",
-        "summary": result_summary
-    })
-@app.route("/api/transactions", methods=["GET"])
-def api_transactions():
-    """
-    Return recent transactions from SQLite (sms_messages table),
-    optionally filtered by month=YYYY-MM.
-    """
-    session = SessionLocal()
-
-    try:
-        # Get distinct year-months (for UI dropdown)
-        months_available = []
-        dates = (
-            session.query(SMSMessage.date)
-            .filter(SMSMessage.date.isnot(None))
-            .all()
-        )
-        # dates is list of tuples: [(datetime,), ...]
-        ym_set = set()
-        for (dt,) in dates:
-            if dt:
-                ym_set.add(dt.strftime("%Y-%m"))
-        months_available = sorted(ym_set)
-
-        # Optional month filter
-        month = request.args.get("month")
-        query = session.query(SMSMessage)
-
-        if month:
-            year, mon = month.split("-")
-            # Filter by year and month in SQLAlchemy
-            query = query.filter(
-                SMSMessage.date.isnot(None),
-                SMSMessage.date.like(f"{year}-{mon}-%"),
-            )
-
-        # Sort by date desc, then id desc
-        query = query.order_by(SMSMessage.date.desc().nullslast(), SMSMessage.id.desc())
-
-        # Limit
-        try:
-            limit = int(request.args.get("limit", "50"))
-        except ValueError:
-            limit = 50
-
-        rows = query.limit(limit).all()
-
-        items = []
-        for msg in rows:
-            items.append({
-                "id": msg.id,
-                "date": msg.date.isoformat(sep=" ") if msg.date else "",
-                "text": msg.text,
-                "category": msg.category,
-                "amount": float(msg.amount or 0.0),
-            })
-
-        return jsonify({
-            "items": items,
-            "months_available": months_available,
-        })
-
-    except Exception as e:
-        print("[API TRANSACTIONS][DB ERROR]", e)
-        return jsonify({"error": "db_error"}), 500
-    finally:
-        session.close()
+    return jsonify({"message": "uploaded", "summary": result_summary})
 
 
-@app.route("/", methods=["GET"])
+# -----------------------------------------------------------------------------
+# HTML upload routes (for manual testing in browser)
+# -----------------------------------------------------------------------------
 @app.route("/", methods=["GET"])
 def index():
     data = load_summary()
@@ -463,7 +652,10 @@ def index():
         summary = None
         category_totals = {}
 
-    return render_template_string(UPLOAD_PAGE, summary=summary, category_totals=category_totals)
+    return render_template_string(
+        UPLOAD_PAGE, summary=summary, category_totals=category_totals
+    )
+
 
 @app.route("/upload", methods=["POST"])
 def upload():
@@ -486,29 +678,37 @@ def upload():
 
     print(f"[UPLOAD] Saved file to: {save_path}")
 
-    # If XML, convert to CSV using your existing importer
     if filename.lower().endswith(".xml"):
-        output_csv = os.path.join("data", "processed", "auto_dataset_from_sms_web.csv")
+        output_csv = os.path.join(
+            "data", "processed", "auto_dataset_from_sms_web.csv"
+        )
         try:
             parse_android_sms_xml(save_path, output_csv)
             flash(f"XML imported and converted to: {output_csv}")
-            classified_csv = os.path.join("data", "processed", "auto_dataset_classified_web.csv")
-            summarized_csv = os.path.join("data", "processed", "auto_dataset_amounts_web.csv")
+            classified_csv = os.path.join(
+                "data", "processed", "auto_dataset_classified_web.csv"
+            )
+            summarized_csv = os.path.join(
+                "data", "processed", "auto_dataset_amounts_web.csv"
+            )
 
             classify_sms_file(output_csv, classified_csv)
             summary = summarize_with_amounts(classified_csv, summarized_csv)
 
-            flash(f"Processed! Total spent: ₹{summary['total_spent']:.2f}, Total income: ₹{summary['total_income']:.2f}, Net: ₹{summary['net']:.2f}")
+            flash(
+                f"Processed! Total spent: ₹{summary['total_spent']:.2f}, "
+                f"Total income: ₹{summary['total_income']:.2f}, "
+                f"Net: ₹{summary['net']:.2f}"
+            )
             print(f"[IMPORT] Parsed XML -> {output_csv}")
             print("[SUMMARY]", summary)
-            # Save summary to JSON so the dashboard can show it
+
             try:
                 os.makedirs(os.path.dirname(SUMMARY_JSON), exist_ok=True)
                 with open(SUMMARY_JSON, "w", encoding="utf-8") as f:
                     json.dump(summary, f)
             except Exception as e:
                 print("[SUMMARY][SAVE][ERROR]", e)
-
         except Exception as e:
             flash(f"Error while parsing XML: {e}")
             print(f"[IMPORT][ERROR] {e}")
@@ -518,6 +718,8 @@ def upload():
     return redirect(url_for("index"))
 
 
+# -----------------------------------------------------------------------------
+# Main
+# -----------------------------------------------------------------------------
 if __name__ == "__main__":
-    # For local development only
     app.run(host="127.0.0.1", port=5000, debug=True)

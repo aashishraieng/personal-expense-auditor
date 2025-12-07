@@ -1,19 +1,21 @@
 import { useEffect, useState } from "react";
 import "./App.css";
-import {
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  Tooltip,
-  CartesianGrid,
-  ResponsiveContainer,
-} from "recharts";
+import AuthScreen from "./components/AuthScreen";
+import Navbar from "./components/Navbar";
+import Dashboard from "./components/Dashboard";
 
 
 const API_BASE = "http://127.0.0.1:5000";
 
 function App() {
+  // ---- Auth state ----
+  const [token, setToken] = useState(null);
+  const [currentUser, setCurrentUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [authError, setAuthError] = useState("");
+  const [authMode, setAuthMode] = useState("login"); // "login" or "signup"
+
+  // ---- Existing app state ----
   const [summary, setSummary] = useState(null);
   const [categoryTotals, setCategoryTotals] = useState({});
   const [loading, setLoading] = useState(false);
@@ -21,23 +23,19 @@ function App() {
   const [uploading, setUploading] = useState(false);
   const [lastUpdated, setLastUpdated] = useState(null);
 
-  // Tabs
   const [activeTab, setActiveTab] = useState("dashboard");
 
-  // Transactions state
   const [transactions, setTransactions] = useState([]);
   const [txLoading, setTxLoading] = useState(false);
   const [txError, setTxError] = useState("");
 
-  // Filters
   const [txCategoryFilter, setTxCategoryFilter] = useState("all");
   const [txSearch, setTxSearch] = useState("");
 
-  // NEW: month selection
   const [monthsAvailable, setMonthsAvailable] = useState([]);
-  const [selectedMonth, setSelectedMonth] = useState("all"); // "all" or "YYYY-MM"
+  const [selectedMonth, setSelectedMonth] = useState("all");
 
-  // --- Helpers ---
+  // ---- Helpers ----
 
   const shorten = (text, max = 90) => {
     if (!text) return "";
@@ -46,7 +44,16 @@ function App() {
 
   const monthLabel = (m) => {
     if (!m || m === "all") return "All time";
-    return m; // could format nicer later
+    return m;
+  };
+
+  // Build headers with token
+  const authHeaders = (extra = {}) => {
+    const h = { ...extra };
+    if (token) {
+      h["Authorization"] = `Bearer ${token}`;
+    }
+    return h;
   };
 
   const categoryChartData = Object.entries(categoryTotals).map(
@@ -56,10 +63,125 @@ function App() {
     })
   );
 
+  // ---- Auth bootstrap: load token from localStorage & validate ----
 
-  // --- Fetch summary (overall or by month) ---
+  useEffect(() => {
+    const savedToken = window.localStorage.getItem("paea_token");
+    if (!savedToken) {
+      setAuthLoading(false);
+      return;
+    }
+
+    const validate = async () => {
+      try {
+        setAuthLoading(true);
+        setAuthError("");
+        const res = await fetch(`${API_BASE}/auth/me`, {
+          headers: authHeaders({ Authorization: `Bearer ${savedToken}` }),
+        });
+        if (!res.ok) {
+          window.localStorage.removeItem("paea_token");
+          setToken(null);
+          setCurrentUser(null);
+        } else {
+          const data = await res.json();
+          setToken(savedToken);
+          setCurrentUser(data);
+        }
+      } catch (err) {
+        console.error(err);
+        window.localStorage.removeItem("paea_token");
+        setToken(null);
+        setCurrentUser(null);
+      } finally {
+        setAuthLoading(false);
+      }
+    };
+
+    validate();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ---- Auth actions ----
+
+  const handleLogin = async (email, password) => {
+    setAuthError("");
+    try {
+      const res = await fetch(`${API_BASE}/auth/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setAuthError(data.error || "Login failed");
+        return;
+      }
+      if (!data.token) {
+        setAuthError("No token returned from server.");
+        return;
+      }
+      window.localStorage.setItem("paea_token", data.token);
+      setToken(data.token);
+
+      // Fetch user info
+      const resMe = await fetch(`${API_BASE}/auth/me`, {
+        headers: authHeaders({ Authorization: `Bearer ${data.token}` }),
+      });
+      if (resMe.ok) {
+        const me = await resMe.json();
+        setCurrentUser(me);
+      }
+
+      // Reset app state
+      setSummary(null);
+      setCategoryTotals({});
+      setTransactions([]);
+      setSelectedMonth("all");
+      setActiveTab("dashboard");
+    } catch (err) {
+      console.error(err);
+      setAuthError("Login error");
+    }
+  };
+
+  const handleSignup = async (email, password) => {
+    setAuthError("");
+    try {
+      const res = await fetch(`${API_BASE}/auth/signup`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setAuthError(data.error || "Signup failed");
+        return;
+      }
+      // Auto-login after signup:
+      await handleLogin(email, password);
+    } catch (err) {
+      console.error(err);
+      setAuthError("Signup error");
+    }
+  };
+
+  const handleLogout = () => {
+    window.localStorage.removeItem("paea_token");
+    setToken(null);
+    setCurrentUser(null);
+    setSummary(null);
+    setCategoryTotals({});
+    setTransactions([]);
+    setMonthsAvailable([]);
+    setSelectedMonth("all");
+    setActiveTab("dashboard");
+  };
+
+  // ---- Data fetching with auth ----
 
   const fetchSummary = async (monthValue) => {
+    if (!token) return; // require login
     setLoading(true);
     setError("");
     try {
@@ -67,7 +189,9 @@ function App() {
       if (monthValue && monthValue !== "all") {
         url += `?month=${monthValue}`;
       }
-      const res = await fetch(url);
+      const res = await fetch(url, {
+        headers: authHeaders(),
+      });
       if (!res.ok) {
         const d = await res.json().catch(() => ({}));
         throw new Error(d.error || "Failed to load summary");
@@ -92,15 +216,17 @@ function App() {
     }
   };
 
-  // Initial load + when selectedMonth changes
+  // Fetch summary when month or token changes and user is logged in
   useEffect(() => {
-    fetchSummary(selectedMonth);
-  }, [selectedMonth]);
-
-  // --- Fetch transactions (by month) when Transactions tab is active or month changes ---
+    if (token) {
+      fetchSummary(selectedMonth);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedMonth, token]);
 
   useEffect(() => {
     const fetchTransactions = async () => {
+      if (!token) return;
       setTxLoading(true);
       setTxError("");
       try {
@@ -108,14 +234,15 @@ function App() {
         if (selectedMonth && selectedMonth !== "all") {
           url += `&month=${selectedMonth}`;
         }
-        const res = await fetch(url);
+        const res = await fetch(url, {
+          headers: authHeaders(),
+        });
         if (!res.ok) {
           const d = await res.json().catch(() => ({}));
           throw new Error(d.error || "Failed to load transactions");
         }
         const data = await res.json();
         setTransactions(data.items || []);
-        // months_available also returned here, but summary endpoint is main source
         if (data.months_available && data.months_available.length > 0) {
           setMonthsAvailable(data.months_available);
         }
@@ -128,15 +255,19 @@ function App() {
       }
     };
 
-    if (activeTab === "transactions") {
+    if (activeTab === "transactions" && token) {
       fetchTransactions();
     }
-  }, [activeTab, selectedMonth]);
-
-  // --- Upload handler ---
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, selectedMonth, token]);
 
   const handleUpload = async (event) => {
     event.preventDefault();
+    if (!token) {
+      alert("Please login first.");
+      return;
+    }
+
     const fileInput = event.target.elements.file;
     if (!fileInput.files || fileInput.files.length === 0) {
       alert("Please choose a file first.");
@@ -152,6 +283,7 @@ function App() {
     try {
       const res = await fetch(`${API_BASE}/api/upload`, {
         method: "POST",
+        headers: authHeaders(), // Authorization only; don't set Content-Type here
         body: formData,
       });
 
@@ -163,9 +295,7 @@ function App() {
       const data = await res.json();
 
       if (data.summary) {
-        // Refresh summary using current month selection
         await fetchSummary(selectedMonth);
-        // Force re-fetch of transactions when tab opened next
         setTransactions([]);
       } else {
         setError("File uploaded, but no summary generated.");
@@ -179,13 +309,11 @@ function App() {
     }
   };
 
-  // Categories list for transaction filter
   const transactionCategories = Array.from(
     new Set(transactions.map((tx) => tx.category))
   ).sort();
 
-  // Apply filters: category + search
-    const filteredTransactions = transactions.filter((tx) => {
+  const filteredTransactions = transactions.filter((tx) => {
     if (txCategoryFilter !== "all" && tx.category !== txCategoryFilter) {
       return false;
     }
@@ -204,34 +332,43 @@ function App() {
     0
   );
 
+  
+
+  // ---- If not logged in, show auth screen ----
+
+    if (!token || !currentUser) {
+    if (authLoading) {
+      return (
+        <div className="app-root">
+          <main className="main">
+            <div className="info-banner">Checking session...</div>
+          </main>
+        </div>
+      );
+    }
+    return (
+      <AuthScreen
+        authMode={authMode}
+        setAuthMode={setAuthMode}
+        authError={authError}
+        authLoading={authLoading}
+        onLogin={handleLogin}
+        onSignup={handleSignup}
+      />
+    );
+  }
+
+  // ---- Main app UI (user is logged in) ----
+
   return (
     <div className="app-root">
       {/* Top Navbar */}
-      <header className="navbar">
-        <div className="navbar-title">Personal Expense Auditor</div>
-        <nav className="navbar-links">
-          <button
-            className={`nav-btn ${activeTab === "dashboard" ? "active" : ""}`}
-            onClick={() => setActiveTab("dashboard")}
-          >
-            Dashboard
-          </button>
-          <button
-            className={`nav-btn ${
-              activeTab === "transactions" ? "active" : ""
-            }`}
-            onClick={() => setActiveTab("transactions")}
-          >
-            Transactions
-          </button>
-          <button
-            className={`nav-btn ${activeTab === "settings" ? "active" : ""}`}
-            onClick={() => setActiveTab("settings")}
-          >
-            Settings
-          </button>
-        </nav>
-      </header>
+      <Navbar
+        activeTab={activeTab}
+        onChangeTab={setActiveTab}
+        currentUser={currentUser}
+        onLogout={handleLogout}
+      />
 
       {/* Main Content */}
       <main className="main">
@@ -243,146 +380,16 @@ function App() {
         )}
 
         {activeTab === "dashboard" && (
-          <>
-            {/* Month selector */}
-            <div style={{ marginBottom: "12px" }}>
-              <label
-                style={{ fontSize: "0.85rem", color: "#4b5563", marginRight: 8 }}
-              >
-                Period:
-              </label>
-              <select
-                value={selectedMonth}
-                onChange={(e) => setSelectedMonth(e.target.value)}
-                style={{ padding: "4px 6px", borderRadius: "6px" }}
-              >
-                <option value="all">All time</option>
-                {monthsAvailable.map((m) => (
-                  <option key={m} value={m}>
-                    {m}
-                  </option>
-                ))}
-              </select>
-              {summary && (
-                <span
-                  style={{
-                    marginLeft: 12,
-                    fontSize: "0.8rem",
-                    color: "#6b7280",
-                  }}
-                >
-                  Showing: {monthLabel(selectedMonth)}
-                </span>
-              )}
-            </div>
-
-            {/* Top summary cards */}
-            {summary && (
-              <section className="summary-grid">
-                <div className="card">
-                  <div className="card-label">Total Spent</div>
-                  <div className="card-value">
-                    ₹{summary.total_spent.toFixed(2)}
-                  </div>
-                </div>
-                <div className="card">
-                  <div className="card-label">Total Income</div>
-                  <div className="card-value">
-                    ₹{summary.total_income.toFixed(2)}
-                  </div>
-                </div>
-                <div
-                  className={`card ${
-                    summary.net < 0 ? "negative" : "positive"
-                  }`}
-                >
-                  <div className="card-label">Net (In - Spent)</div>
-                  <div className="card-value">
-                    ₹{summary.net.toFixed(2)}
-                  </div>
-                </div>
-              </section>
-            )}
-
-            {/* Upload + Category breakdown layout */}
-            <section className="layout-grid">
-              {/* Upload panel */}
-              <div className="card">
-                <h2>Upload SMS Backup</h2>
-                <p>Upload your SMS backup XML file exported from your phone.</p>
-                <form onSubmit={handleUpload}>
-                  <input type="file" name="file" />
-                  <br />
-                  <button
-                    className="primary-btn"
-                    type="submit"
-                    disabled={uploading}
-                  >
-                    {uploading ? "Uploading..." : "Upload & Process"}
-                  </button>
-                </form>
-                {lastUpdated && (
-                  <p
-                    style={{
-                      marginTop: "8px",
-                      fontSize: "0.8rem",
-                      color: "#6b7280",
-                    }}
-                  >
-                    Last updated: {lastUpdated}
-                  </p>
-                )}
-              </div>
-
-                            {/* Category table + chart */}
-              <div className="card">
-                <h2>Category Breakdown</h2>
-                {summary ? (
-                  <>
-                    {/* Chart */}
-                    {categoryChartData.length > 0 && (
-                      <div style={{ width: "100%", height: 220, marginBottom: 12 }}>
-                        <ResponsiveContainer>
-                          <BarChart data={categoryChartData}>
-                            <CartesianGrid strokeDasharray="3 3" />
-                            <XAxis dataKey="category" />
-                            <YAxis />
-                            <Tooltip
-                              formatter={(value) =>
-                                `₹${Number(value).toFixed(2)}`
-                              }
-                            />
-                            <Bar dataKey="amount" />
-                          </BarChart>
-                        </ResponsiveContainer>
-                      </div>
-                    )}
-
-                    {/* Table */}
-                    <table className="category-table">
-                      <thead>
-                        <tr>
-                          <th>Category</th>
-                          <th>Amount (₹)</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {Object.entries(categoryTotals).map(([cat, amt]) => (
-                          <tr key={cat}>
-                            <td>{cat}</td>
-                            <td>₹{amt.toFixed(2)}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </>
-                ) : (
-                  <p>No summary yet. Upload a file to see breakdown.</p>
-                )}
-              </div>
-
-            </section>
-          </>
+          <Dashboard
+            summary={summary}
+            categoryTotals={categoryTotals}
+            monthsAvailable={monthsAvailable}
+            selectedMonth={selectedMonth}
+            setSelectedMonth={setSelectedMonth}
+            uploading={uploading}
+            lastUpdated={lastUpdated}
+            onUpload={handleUpload}
+          />
         )}
 
         {activeTab === "transactions" && (
@@ -402,7 +409,6 @@ function App() {
                 flexWrap: "wrap",
               }}
             >
-              {/* Month selector */}
               <div>
                 <label
                   style={{ fontSize: "0.85rem", color: "#4b5563" }}
@@ -426,7 +432,6 @@ function App() {
                 </select>
               </div>
 
-              {/* Category filter */}
               <div>
                 <label
                   style={{ fontSize: "0.85rem", color: "#4b5563" }}
@@ -450,7 +455,6 @@ function App() {
                 </select>
               </div>
 
-              {/* Search box */}
               <div>
                 <label
                   style={{ fontSize: "0.85rem", color: "#4b5563" }}
@@ -479,7 +483,7 @@ function App() {
             )}
 
             {filteredTransactions.length > 0 && (
-               <>
+              <>
                 <p
                   style={{
                     fontSize: "0.85rem",
@@ -491,77 +495,76 @@ function App() {
                   {filteredTotalAmount.toFixed(2)}
                 </p>
 
-              <table className="category-table">
-                <thead>
-                  <tr>
-                    <th>Date</th>
-                    <th>Category</th>
-                    <th>Amount (₹)</th>
-                    <th>Text</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredTransactions.map((tx) => (
-                    <tr key={tx.id}>
-                      <td style={{ whiteSpace: "nowrap" }}>{tx.date}</td>
-
-                      {/* Category correction dropdown */}
-                      <td>
-                        <select
-                          value={tx.category}
-                          onChange={async (e) => {
-                            const newCat = e.target.value;
-                            try {
-                              const res = await fetch(
-                                `${API_BASE}/api/transactions/${tx.id}`,
-                                {
-                                  method: "PATCH",
-                                  headers: { "Content-Type": "application/json" },
-                                  body: JSON.stringify({ category: newCat }),
-                                }
-                              );
-                              const data = await res.json();
-                              if (!res.ok) {
-                                alert(
-                                  "Update failed: " +
-                                    (data.error || "unknown error")
-                                );
-                                return;
-                              }
-
-                              // Update row immediately in UI
-                              setTransactions((prev) =>
-                                prev.map((t) =>
-                                  t.id === tx.id ? { ...t, category: newCat } : t
-                                )
-                              );
-
-                              // Refresh summary for current month
-                              await fetchSummary(selectedMonth);
-                            } catch (err) {
-                              console.error(err);
-                              alert("Update failed");
-                            }
-                          }}
-                        >
-                          <option value="Debit">Debit</option>
-                          <option value="Credit">Credit</option>
-                          <option value="Refund">Refund</option>
-                          <option value="Shopping/UPI">Shopping/UPI</option>
-                          <option value="Travel">Travel</option>
-                          <option value="Account/Service">
-                            Account/Service
-                          </option>
-                          <option value="Other">Other</option>
-                        </select>
-                      </td>
-
-                      <td>₹{tx.amount.toFixed(2)}</td>
-                      <td>{shorten(tx.text)}</td>
+                <table className="category-table">
+                  <thead>
+                    <tr>
+                      <th>Date</th>
+                      <th>Category</th>
+                      <th>Amount (₹)</th>
+                      <th>Text</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {filteredTransactions.map((tx) => (
+                      <tr key={tx.id}>
+                        <td style={{ whiteSpace: "nowrap" }}>{tx.date}</td>
+                        <td>
+                          <select
+                            value={tx.category}
+                            onChange={async (e) => {
+                              const newCat = e.target.value;
+                              try {
+                                const res = await fetch(
+                                  `${API_BASE}/api/transactions/${tx.id}`,
+                                  {
+                                    method: "PATCH",
+                                    headers: authHeaders({
+                                      "Content-Type": "application/json",
+                                    }),
+                                    body: JSON.stringify({ category: newCat }),
+                                  }
+                                );
+                                const data = await res.json();
+                                if (!res.ok) {
+                                  alert(
+                                    "Update failed: " +
+                                      (data.error || "unknown error")
+                                  );
+                                  return;
+                                }
+
+                                setTransactions((prev) =>
+                                  prev.map((t) =>
+                                    t.id === tx.id
+                                      ? { ...t, category: newCat }
+                                      : t
+                                  )
+                                );
+
+                                await fetchSummary(selectedMonth);
+                              } catch (err) {
+                                console.error(err);
+                                alert("Update failed");
+                              }
+                            }}
+                          >
+                            <option value="Debit">Debit</option>
+                            <option value="Credit">Credit</option>
+                            <option value="Refund">Refund</option>
+                            <option value="Shopping/UPI">Shopping/UPI</option>
+                            <option value="Travel">Travel</option>
+                            <option value="Account/Service">
+                              Account/Service
+                            </option>
+                            <option value="Other">Other</option>
+                          </select>
+                        </td>
+                        <td>₹{tx.amount.toFixed(2)}</td>
+                        <td>{shorten(tx.text)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </>
             )}
           </section>

@@ -17,6 +17,7 @@ class SMSMessage(Base):
     __tablename__ = "sms_messages"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, nullable=True)  # NEW: owner of this SMS
     date = Column(DateTime, nullable=True)
     text = Column(String, nullable=False)
     amount = Column(Float, nullable=True)
@@ -25,6 +26,15 @@ class SMSMessage(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow)
 
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    email = Column(String, unique=True, nullable=False)
+    password_hash = Column(String, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
 
 def init_db():
     Base.metadata.create_all(bind=engine)
+
