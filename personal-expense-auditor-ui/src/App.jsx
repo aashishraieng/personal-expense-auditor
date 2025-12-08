@@ -103,6 +103,87 @@ function App() {
   }, []);
 
   // ---- Auth actions ----
+    const handleDeleteMyData = async () => {
+    if (!token) {
+      alert("Please login first.");
+      return;
+    }
+
+    const ok = window.confirm(
+      "This will delete ALL your transactions for this account. Continue?"
+    );
+    if (!ok) return;
+
+    try {
+      const res = await fetch(`${API_BASE}/api/my-data`, {
+        method: "DELETE",
+        headers: authHeaders(),
+      });
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        alert("Delete failed: " + (data.error || res.status));
+        return;
+      }
+
+      // Clear local state so dashboard + transactions show empty
+      setSummary(null);
+      setCategoryTotals({});
+      setTransactions([]);
+      setMonthsAvailable([]);
+      setSelectedMonth("all");
+
+      alert(`Deleted ${data.deleted || 0} transactions for this user.`);
+    } catch (err) {
+      console.error(err);
+      alert("Error deleting data.");
+    }
+  };
+    const handleDeleteAccount = async () => {
+    if (!token) {
+      alert("Please login first.");
+      return;
+    }
+
+    const ok = window.confirm(
+      "This will delete your account AND all your transactions permanently.\nYou will be logged out.\n\nContinue?"
+    );
+    if (!ok) return;
+
+    try {
+      const res = await fetch(`${API_BASE}/auth/delete-account`, {
+        method: "DELETE",
+        headers: authHeaders(),
+      });
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        alert("Account delete failed: " + (data.error || res.status));
+        return;
+      }
+
+      // Clear token everywhere
+      window.localStorage.removeItem("paea_token");
+      setToken(null);
+      setCurrentUser(null);
+
+      // Clear app state
+      setSummary(null);
+      setCategoryTotals({});
+      setTransactions([]);
+      setMonthsAvailable([]);
+      setSelectedMonth("all");
+      setActiveTab("dashboard");
+
+      alert(
+        `Account deleted. Removed ${data.sms_deleted || 0} transactions.\nYou are now logged out.`
+      );
+    } catch (err) {
+      console.error(err);
+      alert("Error deleting account.");
+    }
+  };
+
 
   const handleLogin = async (email, password) => {
     setAuthError("");
@@ -570,12 +651,50 @@ function App() {
           </section>
         )}
 
-        {activeTab === "settings" && (
+          {activeTab === "settings" && (
           <section className="card">
             <h2>Settings</h2>
-            <p>Settings will go here in a later phase.</p>
+            <p style={{ fontSize: "0.9rem", color: "#4b5563" }}>
+              Logged in as <b>{currentUser?.email}</b>
+            </p>
+
+            <hr style={{ margin: "12px 0" }} />
+
+            <h3 style={{ marginBottom: 6 }}>Data control</h3>
+            <p style={{ fontSize: "0.85rem", color: "#6b7280" }}>
+              You can delete all transactions for this account. This will not
+              delete your login, only the SMS/transaction records.
+            </p>
+
+            <button
+              className="primary-btn"
+              style={{ marginTop: 10 }}
+              type="button"
+              onClick={handleDeleteMyData}
+            >
+              Delete all my data
+            </button>
+
+            <hr style={{ margin: "16px 0" }} />
+
+            <h3 style={{ marginBottom: 6 }}>Account</h3>
+            <p style={{ fontSize: "0.85rem", color: "#b91c1c" }}>
+              Deleting your account will remove your login and all transactions.
+              This cannot be undone.
+            </p>
+
+            <button
+              className="primary-btn"
+              style={{ marginTop: 10, backgroundColor: "#b91c1c" }}
+              type="button"
+              onClick={handleDeleteAccount}
+            >
+              Delete my account
+            </button>
           </section>
         )}
+
+
       </main>
     </div>
   );

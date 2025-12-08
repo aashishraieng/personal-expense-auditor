@@ -574,6 +574,94 @@ def api_update_transaction(row_id: int):
         }
     )
 
+@app.route("/auth/delete-account", methods=["DELETE"])
+def delete_account():
+    """
+    Delete the current user account AND all their SMS data.
+    Requires Authorization: Bearer <token>.
+    After this, the token is invalid.
+    """
+    user_id = get_user_id_from_request()
+    if not user_id:
+        return jsonify({"error": "unauthorized"}), 401
+
+    session = SessionLocal()
+    try:
+        # Delete SMS for this user
+        sms_deleted = (
+            session.query(SMSMessage)
+            .filter(SMSMessage.user_id == user_id)
+            .delete(synchronize_session=False)
+        )
+
+        # Delete user row
+        user = session.get(User, user_id)
+        if user:
+            session.delete(user)
+
+        session.commit()
+
+        # Remove any tokens for this user from tokens.json
+        tokens_file = os.path.join("data", "tokens.json")
+        if os.path.exists(tokens_file):
+            try:
+                with open(tokens_file, "r") as f:
+                    tokens = json.load(f)
+            except Exception:
+                tokens = {}
+
+            # Drop all tokens that point to this user_id
+            tokens = {
+                t: uid for t, uid in tokens.items() if uid != user_id
+            }
+
+            with open(tokens_file, "w") as f:
+                json.dump(tokens, f)
+
+        print(
+            f"[DELETE ACCOUNT] user_id={user_id}, sms_deleted={sms_deleted}"
+        )
+
+        return jsonify({
+            "status": "ok",
+            "sms_deleted": int(sms_deleted),
+        })
+
+    except Exception as e:
+        session.rollback()
+        print("[DELETE ACCOUNT][ERROR]", e)
+        return jsonify({"error": "server"}), 500
+    finally:
+        session.close()
+
+@app.route("/api/my-data", methods=["DELETE"])
+def api_delete_my_data():
+    """
+    Delete ALL SMS/transactions for the current user.
+    Requires Authorization header (token). If no token -> 401.
+    """
+    user_id = get_user_id_from_request()
+    if not user_id:
+        return jsonify({"error": "unauthorized"}), 401
+
+    session = SessionLocal()
+    try:
+        deleted = (
+            session.query(SMSMessage)
+            .filter(SMSMessage.user_id == user_id)
+            .delete(synchronize_session=False)
+        )
+        session.commit()
+        print(f"[DELETE MY DATA] user_id={user_id}, deleted_rows={deleted}")
+        return jsonify({"status": "ok", "deleted": int(deleted)})
+    except Exception as e:
+        session.rollback()
+        print("[DELETE MY DATA][ERROR]", e)
+        return jsonify({"error": "server"}), 500
+    finally:
+        session.close()
+
+
 
 @app.route("/api/upload", methods=["POST"])
 def api_upload():
@@ -716,6 +804,7 @@ def upload():
         flash(f"File uploaded (CSV). Saved as: {save_path}")
 
     return redirect(url_for("index"))
+
 
 
 # -----------------------------------------------------------------------------
