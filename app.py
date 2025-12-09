@@ -19,6 +19,20 @@ from analyze_sms_file import classify_sms_file
 from summarize_expenses import summarize_with_amounts
 from db import SessionLocal, init_db, SMSMessage, User
 from auth_utils import hash_password, verify_password, make_token
+from sms_classifier import classify_sms_text, extract_amount
+
+
+
+from joblib import load
+import re
+
+# Load ML model once at startup
+CATEGORY_MODEL = load("models/category_model.joblib")
+
+# Amount extraction regex ( INR / Rs / AED / ₹ )
+AMOUNT_REGEX = re.compile(
+    r'(?i)(?:rs|inr|aed|₹)\s*[\.:]?\s*([0-9,]+(?:\.\d+)?)'
+)
 
 # -----------------------------------------------------------------------------
 # Flask app setup
@@ -723,6 +737,147 @@ def api_upload():
     return jsonify({"message": "uploaded", "summary": result_summary})
 
 
+@app.route("/api/ingest-sms", methods=["POST"])
+def api_ingest_sms():
+    """
+    Ingest SMS from mobile app.
+    Body: JSON array of { "text": "...", "timestamp": "..." }.
+    Requires Authorization: Bearer <token>.
+    For each SMS:
+      - classify via shared rules + model
+      - extract amount
+      - parse timestamp
+      - insert into DB (if not duplicate)
+    Returns:
+      - inserted count
+      - skipped (duplicates) count
+      - updated overall summary for this user
+    """
+    user_id = get_user_id_from_request()
+    if not user_id:
+        return jsonify({"error": "unauthorized"}), 401
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, list):
+        return jsonify(
+            {"error": "invalid_payload", "detail": "expected JSON array"}
+        ), 400
+
+    session = SessionLocal()
+    inserted = 0
+    skipped = 0
+
+    try:
+        # ---------- load existing keys for this user ----------
+        existing_msgs = session.query(SMSMessage).filter(
+            SMSMessage.user_id == user_id
+        ).all()
+
+        existing_keys = set()
+        for m in existing_msgs:
+            key = (
+                (m.text or "").strip(),
+                float(m.amount or 0.0),
+                m.date.date().isoformat() if m.date else None,
+            )
+            existing_keys.add(key)
+
+        # ---------- process incoming messages ----------
+        for i, item in enumerate(data):
+            if not isinstance(item, dict):
+                return jsonify({"error": "invalid_item", "index": i}), 400
+
+            text = str(item.get("text", "")).strip()
+            ts_str = item.get("timestamp")
+
+            if not text:
+                return jsonify({"error": "missing_text", "index": i}), 400
+
+            # Parse timestamp
+            dt = None
+            if ts_str:
+                try:
+                    dt = pd.to_datetime(ts_str, errors="coerce")
+                except Exception:
+                    dt = None
+
+            # Classify + amount
+            predicted = classify_sms_text(text)
+            amt = extract_amount(text)
+
+            key = (
+                text,
+                float(amt),
+                dt.date().isoformat() if dt is not None else None,
+            )
+
+            # Duplicate check
+            if key in existing_keys:
+                skipped += 1
+                continue
+
+            msg = SMSMessage(
+                user_id=user_id,
+                date=dt,
+                text=text,
+                category=predicted,
+                amount=amt,
+                corrected=False,
+            )
+            session.add(msg)
+            inserted += 1
+            existing_keys.add(key)
+
+        session.commit()
+
+        # ---------- compute updated summary from DB ----------
+        rows = session.query(SMSMessage).filter(
+            SMSMessage.user_id == user_id,
+            SMSMessage.amount.isnot(None),
+            SMSMessage.amount > 0,
+        ).all()
+
+        category_totals = {}
+        for msg in rows:
+            cat = msg.category
+            amt = float(msg.amount or 0.0)
+            category_totals[cat] = category_totals.get(cat, 0.0) + amt
+
+        spent = 0.0
+        income = 0.0
+        for cat, amt in category_totals.items():
+            if cat in ["Debit", "Shopping/UPI"]:
+                spent += amt
+            elif cat in ["Credit", "Refund"]:
+                income += amt
+
+        summary = {
+            "total_spent": float(spent),
+            "total_income": float(income),
+            "net": float(income - spent),
+            "category_totals": category_totals,
+        }
+
+        print(
+            f"[INGEST SMS] user_id={user_id}, inserted={inserted}, skipped={skipped}"
+        )
+        return jsonify(
+            {
+                "status": "ok",
+                "inserted": inserted,
+                "skipped": skipped,
+                "summary": summary,
+            }
+        )
+
+    except Exception as e:
+        session.rollback()
+        print("[INGEST SMS][ERROR]", e)
+        return jsonify({"error": "server"}), 500
+    finally:
+        session.close()
+
+
 # -----------------------------------------------------------------------------
 # HTML upload routes (for manual testing in browser)
 # -----------------------------------------------------------------------------
@@ -806,6 +961,53 @@ def upload():
     return redirect(url_for("index"))
 
 
+@app.route("/api/stats", methods=["GET"])
+def api_stats():
+    """
+    Return basic data stats for current user:
+      - total number of transaction rows
+      - first transaction date
+      - last transaction date
+    """
+    user_id = get_user_id_from_request()
+    if not user_id:
+        return jsonify({"error": "unauthorized"}), 401
+
+    session = SessionLocal()
+    try:
+        base_q = session.query(SMSMessage).filter(
+            SMSMessage.user_id == user_id,
+            SMSMessage.amount.isnot(None),
+            SMSMessage.amount > 0,
+        )
+
+        total = base_q.count()
+
+        first_row = (
+            base_q.order_by(SMSMessage.date.asc().nullslast()).first()
+        )
+        last_row = (
+            base_q.order_by(SMSMessage.date.desc().nullslast()).first()
+        )
+
+        def fmt_date(row):
+            if not row or not row.date:
+                return None
+            # isoformat without timezone is fine here
+            return row.date.date().isoformat()
+
+        return jsonify(
+            {
+                "count": total,
+                "first_date": fmt_date(first_row),
+                "last_date": fmt_date(last_row),
+            }
+        )
+    except Exception as e:
+        print("[API STATS][ERROR]", e)
+        return jsonify({"error": "server"}), 500
+    finally:
+        session.close()
 
 # -----------------------------------------------------------------------------
 # Main

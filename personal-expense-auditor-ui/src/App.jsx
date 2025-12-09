@@ -4,7 +4,6 @@ import AuthScreen from "./components/AuthScreen";
 import Navbar from "./components/Navbar";
 import Dashboard from "./components/Dashboard";
 
-
 const API_BASE = "http://127.0.0.1:5000";
 
 function App() {
@@ -15,7 +14,7 @@ function App() {
   const [authError, setAuthError] = useState("");
   const [authMode, setAuthMode] = useState("login"); // "login" or "signup"
 
-  // ---- Existing app state ----
+  // ---- App state ----
   const [summary, setSummary] = useState(null);
   const [categoryTotals, setCategoryTotals] = useState({});
   const [loading, setLoading] = useState(false);
@@ -35,6 +34,11 @@ function App() {
   const [monthsAvailable, setMonthsAvailable] = useState([]);
   const [selectedMonth, setSelectedMonth] = useState("all");
 
+  // ---- Stats state ----
+  const [stats, setStats] = useState(null);
+  const [statsLoading, setStatsLoading] = useState(false);
+  const [statsError, setStatsError] = useState("");
+
   // ---- Helpers ----
 
   const shorten = (text, max = 90) => {
@@ -47,7 +51,6 @@ function App() {
     return m;
   };
 
-  // Build headers with token
   const authHeaders = (extra = {}) => {
     const h = { ...extra };
     if (token) {
@@ -63,7 +66,37 @@ function App() {
     })
   );
 
-  // ---- Auth bootstrap: load token from localStorage & validate ----
+  // ---- Stats fetch ----
+
+  const fetchStats = async () => {
+    if (!token) return;
+    setStatsLoading(true);
+    setStatsError("");
+    try {
+      const res = await fetch(`${API_BASE}/api/stats`, {
+        headers: authHeaders(),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setStats(null);
+        setStatsError(data.error || "Failed to load stats");
+        return;
+      }
+      setStats({
+        count: data.count || 0,
+        first_date: data.first_date || null,
+        last_date: data.last_date || null,
+      });
+    } catch (err) {
+      console.error(err);
+      setStats(null);
+      setStatsError("Failed to load stats");
+    } finally {
+      setStatsLoading(false);
+    }
+  };
+
+  // ---- Auth bootstrap ----
 
   useEffect(() => {
     const savedToken = window.localStorage.getItem("paea_token");
@@ -102,8 +135,9 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ---- Auth actions ----
-    const handleDeleteMyData = async () => {
+  // ---- Delete my data / account ----
+
+  const handleDeleteMyData = async () => {
     if (!token) {
       alert("Please login first.");
       return;
@@ -126,12 +160,12 @@ function App() {
         return;
       }
 
-      // Clear local state so dashboard + transactions show empty
       setSummary(null);
       setCategoryTotals({});
       setTransactions([]);
       setMonthsAvailable([]);
       setSelectedMonth("all");
+      setStats(null);
 
       alert(`Deleted ${data.deleted || 0} transactions for this user.`);
     } catch (err) {
@@ -139,7 +173,8 @@ function App() {
       alert("Error deleting data.");
     }
   };
-    const handleDeleteAccount = async () => {
+
+  const handleDeleteAccount = async () => {
     if (!token) {
       alert("Please login first.");
       return;
@@ -162,17 +197,16 @@ function App() {
         return;
       }
 
-      // Clear token everywhere
       window.localStorage.removeItem("paea_token");
       setToken(null);
       setCurrentUser(null);
 
-      // Clear app state
       setSummary(null);
       setCategoryTotals({});
       setTransactions([]);
       setMonthsAvailable([]);
       setSelectedMonth("all");
+      setStats(null);
       setActiveTab("dashboard");
 
       alert(
@@ -184,6 +218,7 @@ function App() {
     }
   };
 
+  // ---- Auth actions ----
 
   const handleLogin = async (email, password) => {
     setAuthError("");
@@ -205,7 +240,6 @@ function App() {
       window.localStorage.setItem("paea_token", data.token);
       setToken(data.token);
 
-      // Fetch user info
       const resMe = await fetch(`${API_BASE}/auth/me`, {
         headers: authHeaders({ Authorization: `Bearer ${data.token}` }),
       });
@@ -214,11 +248,11 @@ function App() {
         setCurrentUser(me);
       }
 
-      // Reset app state
       setSummary(null);
       setCategoryTotals({});
       setTransactions([]);
       setSelectedMonth("all");
+      await fetchStats();
       setActiveTab("dashboard");
     } catch (err) {
       console.error(err);
@@ -239,7 +273,6 @@ function App() {
         setAuthError(data.error || "Signup failed");
         return;
       }
-      // Auto-login after signup:
       await handleLogin(email, password);
     } catch (err) {
       console.error(err);
@@ -256,13 +289,14 @@ function App() {
     setTransactions([]);
     setMonthsAvailable([]);
     setSelectedMonth("all");
+    setStats(null);
     setActiveTab("dashboard");
   };
 
-  // ---- Data fetching with auth ----
+  // ---- Summary fetch ----
 
   const fetchSummary = async (monthValue) => {
-    if (!token) return; // require login
+    if (!token) return;
     setLoading(true);
     setError("");
     try {
@@ -297,10 +331,12 @@ function App() {
     }
   };
 
-  // Fetch summary when month or token changes and user is logged in
+  // ---- Effects ----
+
   useEffect(() => {
     if (token) {
       fetchSummary(selectedMonth);
+      fetchStats();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedMonth, token]);
@@ -342,6 +378,8 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, selectedMonth, token]);
 
+  // ---- Upload (used from Settings) ----
+
   const handleUpload = async (event) => {
     event.preventDefault();
     if (!token) {
@@ -364,7 +402,7 @@ function App() {
     try {
       const res = await fetch(`${API_BASE}/api/upload`, {
         method: "POST",
-        headers: authHeaders(), // Authorization only; don't set Content-Type here
+        headers: authHeaders(),
         body: formData,
       });
 
@@ -377,6 +415,7 @@ function App() {
 
       if (data.summary) {
         await fetchSummary(selectedMonth);
+        await fetchStats();
         setTransactions([]);
       } else {
         setError("File uploaded, but no summary generated.");
@@ -389,6 +428,8 @@ function App() {
       event.target.reset();
     }
   };
+
+  // ---- Transaction filters ----
 
   const transactionCategories = Array.from(
     new Set(transactions.map((tx) => tx.category))
@@ -413,11 +454,9 @@ function App() {
     0
   );
 
-  
+  // ---- Auth screen ----
 
-  // ---- If not logged in, show auth screen ----
-
-    if (!token || !currentUser) {
+  if (!token || !currentUser) {
     if (authLoading) {
       return (
         <div className="app-root">
@@ -439,11 +478,10 @@ function App() {
     );
   }
 
-  // ---- Main app UI (user is logged in) ----
+  // ---- Main UI ----
 
   return (
     <div className="app-root">
-      {/* Top Navbar */}
       <Navbar
         activeTab={activeTab}
         onChangeTab={setActiveTab}
@@ -451,7 +489,6 @@ function App() {
         onLogout={handleLogout}
       />
 
-      {/* Main Content */}
       <main className="main">
         {error && activeTab === "dashboard" && (
           <div className="error-banner">{error}</div>
@@ -467,9 +504,6 @@ function App() {
             monthsAvailable={monthsAvailable}
             selectedMonth={selectedMonth}
             setSelectedMonth={setSelectedMonth}
-            uploading={uploading}
-            lastUpdated={lastUpdated}
-            onUpload={handleUpload}
           />
         )}
 
@@ -651,50 +685,135 @@ function App() {
           </section>
         )}
 
-          {activeTab === "settings" && (
-          <section className="card">
-            <h2>Settings</h2>
-            <p style={{ fontSize: "0.9rem", color: "#4b5563" }}>
-              Logged in as <b>{currentUser?.email}</b>
-            </p>
+        {activeTab === "settings" && (
+          <>
+            <section className="card">
+              <h2>Settings</h2>
+              <p style={{ fontSize: "0.9rem", color: "#4b5563" }}>
+                Logged in as <b>{currentUser?.email}</b>
+              </p>
 
-            <hr style={{ margin: "12px 0" }} />
+              <hr style={{ margin: "12px 0" }} />
 
-            <h3 style={{ marginBottom: 6 }}>Data control</h3>
-            <p style={{ fontSize: "0.85rem", color: "#6b7280" }}>
-              You can delete all transactions for this account. This will not
-              delete your login, only the SMS/transaction records.
-            </p>
+              <h3 style={{ marginBottom: 6 }}>Data overview</h3>
+              {statsLoading ? (
+                <p style={{ fontSize: "0.85rem", color: "#6b7280" }}>
+                  Loading stats...
+                </p>
+              ) : statsError ? (
+                <p
+                  style={{
+                    fontSize: "0.85rem",
+                    color: "#b91c1c",
+                  }}
+                >
+                  {statsError}
+                </p>
+              ) : stats && stats.count > 0 ? (
+                <ul
+                  style={{
+                    fontSize: "0.85rem",
+                    color: "#4b5563",
+                    marginLeft: 16,
+                    marginBottom: 8,
+                  }}
+                >
+                  <li>
+                    Total transactions: <b>{stats.count}</b>
+                  </li>
+                  {stats.first_date && (
+                    <li>
+                      From: <b>{stats.first_date}</b>
+                    </li>
+                  )}
+                  {stats.last_date && (
+                    <li>
+                      Latest: <b>{stats.last_date}</b>
+                    </li>
+                  )}
+                </ul>
+              ) : (
+                <p style={{ fontSize: "0.85rem", color: "#6b7280" }}>
+                  No transactions stored yet for this account.
+                </p>
+              )}
 
-            <button
-              className="primary-btn"
-              style={{ marginTop: 10 }}
-              type="button"
-              onClick={handleDeleteMyData}
-            >
-              Delete all my data
-            </button>
+              <hr style={{ margin: "12px 0" }} />
 
-            <hr style={{ margin: "16px 0" }} />
+              <h3 style={{ marginBottom: 6 }}>Data control</h3>
+              <p style={{ fontSize: "0.85rem", color: "#6b7280" }}>
+                You can delete all transactions for this account. This will not
+                delete your login, only the SMS/transaction records.
+              </p>
 
-            <h3 style={{ marginBottom: 6 }}>Account</h3>
-            <p style={{ fontSize: "0.85rem", color: "#b91c1c" }}>
-              Deleting your account will remove your login and all transactions.
-              This cannot be undone.
-            </p>
+              <button
+                className="primary-btn"
+                style={{ marginTop: 10 }}
+                type="button"
+                onClick={handleDeleteMyData}
+              >
+                Delete all my data
+              </button>
 
-            <button
-              className="primary-btn"
-              style={{ marginTop: 10, backgroundColor: "#b91c1c" }}
-              type="button"
-              onClick={handleDeleteAccount}
-            >
-              Delete my account
-            </button>
-          </section>
+              <hr style={{ margin: "16px 0" }} />
+
+              <h3 style={{ marginBottom: 6 }}>Account</h3>
+              <p style={{ fontSize: "0.85rem", color: "#b91c1c" }}>
+                Deleting your account will remove your login and all
+                transactions. This cannot be undone.
+              </p>
+
+              <button
+                className="primary-btn"
+                style={{ marginTop: 10, backgroundColor: "#b91c1c" }}
+                type="button"
+                onClick={handleDeleteAccount}
+              >
+                Delete my account
+              </button>
+            </section>
+
+            <section className="card">
+              <h2>Manual SMS backup upload</h2>
+              <p style={{ fontSize: "0.85rem", color: "#6b7280" }}>
+                If automatic phone sync is not available yet, you can import
+                your SMS by uploading a backup file exported from{" "}
+                <b>SMS Backup &amp; Restore</b> (XML) or a CSV.
+              </p>
+
+              <form
+                onSubmit={handleUpload}
+                style={{
+                  marginTop: 12,
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 8,
+                }}
+              >
+                <input type="file" name="file" accept=".xml,.csv" />
+                <button
+                  type="submit"
+                  className="primary-btn"
+                  disabled={uploading}
+                >
+                  {uploading ? "Uploading..." : "Upload &amp; Process"}
+                </button>
+              </form>
+
+              {lastUpdated && (
+                <p
+                  style={{
+                    marginTop: "8px",
+                    fontSize: "0.8rem",
+                    color: "#6b7280",
+                  }}
+                >
+                  Last updated: {lastUpdated}
+                </p>
+              )}
+            </section>
+          </>
         )}
-
-
       </main>
     </div>
   );
