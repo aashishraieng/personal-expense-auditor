@@ -38,8 +38,63 @@ function App() {
   const [stats, setStats] = useState(null);
   const [statsLoading, setStatsLoading] = useState(false);
   const [statsError, setStatsError] = useState("");
+  
+   // ---- Monthly summary state ----
+  const [monthlySummary, setMonthlySummary] = useState([]);
 
+   // ---- Insights state ----
+  const [insights, setInsights] = useState(null);
+
+  // ---- Budgets state ----
+  const [budgets, setBudgets] = useState([]);
+  const [budgetsLoading, setBudgetsLoading] = useState(false);
+  const [budgetsError, setBudgetsError] = useState("");
+ // ---- Recurring payments state ----
+  const [recurring, setRecurring] = useState([]);
   // ---- Helpers ----
+      const fetchRecurring = async () => {
+    if (!token) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/recurring`, {
+        headers: authHeaders(),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        console.error("Failed to load recurring payments", data);
+        setRecurring([]);
+        return;
+      }
+      setRecurring(data.items || []);
+    } catch (err) {
+      console.error(err);
+      setRecurring([]);
+    }
+  };
+
+    const fetchBudgets = async () => {
+    if (!token) return;
+    setBudgetsLoading(true);
+    setBudgetsError("");
+    try {
+      const res = await fetch(`${API_BASE}/api/budgets`, {
+        headers: authHeaders(),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setBudgets([]);
+        setBudgetsError(data.error || "Failed to load budgets");
+        return;
+      }
+      setBudgets(data.items || []);
+    } catch (err) {
+      console.error(err);
+      setBudgets([]);
+      setBudgetsError("Failed to load budgets");
+    } finally {
+      setBudgetsLoading(false);
+    }
+  };
+
 
   const shorten = (text, max = 90) => {
     if (!text) return "";
@@ -218,6 +273,36 @@ function App() {
     }
   };
 
+  const handleExportCSV = async () => {
+  if (!token) {
+    alert("Please login first.");
+    return;
+  }
+
+  try {
+    const res = await fetch(`${API_BASE}/api/export`, {
+      headers: authHeaders(),
+    });
+
+    if (!res.ok) {
+      alert("Export failed.");
+      return;
+    }
+
+    const blob = await res.blob();
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "transactions_export.csv";
+    a.click();
+    window.URL.revokeObjectURL(url);
+  } catch (err) {
+    console.error(err);
+    alert("Export error.");
+  }
+};
+
+
   // ---- Auth actions ----
 
   const handleLogin = async (email, password) => {
@@ -337,6 +422,10 @@ function App() {
     if (token) {
       fetchSummary(selectedMonth);
       fetchStats();
+      fetchMonthlySummary();
+      fetchInsights(selectedMonth);
+      fetchBudgets();
+      fetchRecurring();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedMonth, token]);
@@ -428,6 +517,122 @@ function App() {
       event.target.reset();
     }
   };
+    const fetchMonthlySummary = async () => {
+    if (!token) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/monthly-summary`, {
+        headers: authHeaders(),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        console.error("Failed to load monthly summary", data);
+        setMonthlySummary([]);
+        return;
+      }
+      setMonthlySummary(data.items || []);
+    } catch (err) {
+      console.error(err);
+      setMonthlySummary([]);
+    }
+  };
+
+  const fetchInsights = async (monthValue) => {
+    if (!token) return;
+
+    try {
+      let url = `${API_BASE}/api/insights`;
+      // If a specific month is selected, pass it; if "all", let backend use latest
+      if (monthValue && monthValue !== "all") {
+        url += `?month=${monthValue}`;
+      }
+
+      const res = await fetch(url, {
+        headers: authHeaders(),
+      });
+      const data = await res.json().catch(() => ({}));
+
+      if (!res.ok) {
+        console.error("Failed to load insights", data);
+        setInsights(null);
+        return;
+      }
+
+      setInsights(data);
+    } catch (err) {
+      console.error(err);
+      setInsights(null);
+    }
+  };
+
+    const knownBudgetCategories = [
+    "Debit",
+    "Shopping/UPI",
+    "Travel",
+    "Other",
+  ];
+
+  const getBudgetValue = (category) => {
+    const found = budgets.find((b) => b.category === category);
+    return found ? String(found.monthly_limit) : "";
+  };
+
+  const handleBudgetChange = (category, value) => {
+    setBudgets((prev) => {
+      const numeric = value === "" ? "" : Number(value);
+      // keep as string in UI; convert to number on save
+      const exists = prev.find((b) => b.category === category);
+      if (!exists) {
+        return [...prev, { id: null, category, monthly_limit: value }];
+      }
+      return prev.map((b) =>
+        b.category === category ? { ...b, monthly_limit: value } : b
+      );
+    });
+  };
+
+  const handleSaveBudgets = async () => {
+    if (!token) {
+      alert("Please login first.");
+      return;
+    }
+
+    const items = knownBudgetCategories
+      .map((cat) => {
+        const val = getBudgetValue(cat);
+        if (val === "") return null;
+        const num = Number(val);
+        if (Number.isNaN(num) || num <= 0) return null;
+        return { category: cat, monthly_limit: num };
+      })
+      .filter(Boolean);
+
+    if (items.length === 0) {
+      const ok = window.confirm(
+        "No valid positive limits entered. This will clear all budgets for your account. Continue?"
+      );
+      if (!ok) return;
+    }
+
+    try {
+      const res = await fetch(`${API_BASE}/api/budgets`, {
+        method: "POST",
+        headers: authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ items }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        alert("Failed to save budgets: " + (data.error || res.status));
+        return;
+      }
+      alert("Budgets saved.");
+      // reload from server so we stay in sync
+      fetchBudgets();
+    } catch (err) {
+      console.error(err);
+      alert("Error saving budgets.");
+    }
+  };
+
 
   // ---- Transaction filters ----
 
@@ -498,14 +703,21 @@ function App() {
         )}
 
         {activeTab === "dashboard" && (
+                  
           <Dashboard
             summary={summary}
             categoryTotals={categoryTotals}
             monthsAvailable={monthsAvailable}
             selectedMonth={selectedMonth}
             setSelectedMonth={setSelectedMonth}
+            monthlySummary={monthlySummary}
+            insights={insights}
+            budgets={budgets}
+            recurring={recurring}
           />
         )}
+
+
 
         {activeTab === "transactions" && (
           <section className="card">
@@ -685,7 +897,7 @@ function App() {
           </section>
         )}
 
-        {activeTab === "settings" && (
+                {activeTab === "settings" && (
           <>
             <section className="card">
               <h2>Settings</h2>
@@ -773,6 +985,69 @@ function App() {
               </button>
             </section>
 
+            {/* New Budgets card */}
+            <section className="card">
+              <h2>Budgets</h2>
+              <p style={{ fontSize: "0.85rem", color: "#6b7280" }}>
+                Set monthly limits for key spending categories. We&apos;ll use
+                these to warn you when you are close to or over your limits.
+              </p>
+
+              {budgetsLoading && (
+                <p style={{ fontSize: "0.85rem", color: "#6b7280" }}>
+                  Loading budgets...
+                </p>
+              )}
+              {budgetsError && (
+                <p style={{ fontSize: "0.85rem", color: "#b91c1c" }}>
+                  {budgetsError}
+                </p>
+              )}
+
+              <table className="category-table" style={{ marginTop: 12 }}>
+                <thead>
+                  <tr>
+                    <th>Category</th>
+                    <th>Monthly limit (₹)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {knownBudgetCategories.map((cat) => (
+                    <tr key={cat}>
+                      <td>{cat}</td>
+                      <td>
+                        <input
+                          type="number"
+                          min="0"
+                          step="100"
+                          value={getBudgetValue(cat)}
+                          onChange={(e) =>
+                            handleBudgetChange(cat, e.target.value)
+                          }
+                          placeholder="e.g. 10000"
+                          style={{
+                            width: "100%",
+                            padding: "4px 6px",
+                            borderRadius: "6px",
+                            border: "1px solid #d1d5db",
+                          }}
+                        />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+
+              <button
+                className="primary-btn"
+                style={{ marginTop: 10 }}
+                type="button"
+                onClick={handleSaveBudgets}
+              >
+                Save budgets
+              </button>
+            </section>
+
             <section className="card">
               <h2>Manual SMS backup upload</h2>
               <p style={{ fontSize: "0.85rem", color: "#6b7280" }}>
@@ -814,6 +1089,7 @@ function App() {
             </section>
           </>
         )}
+
       </main>
     </div>
   );

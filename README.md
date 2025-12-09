@@ -176,3 +176,42 @@ Deployment choice selected: Cloud deployment soon
 
 for install through requirements.txt
 pip install -r requirements.txt
+
+
+## Model Retraining (Admin Workflow)
+
+The SMS category model learns from real user corrections.
+
+### Data sources
+
+- `data/processed/training_dataset.csv`
+  - Manually labeled base dataset.
+- `data/processed/corrections_web.csv`
+  - Auto-appended whenever a user changes the category in the UI
+    (`PATCH /api/transactions/<id>`).
+- `data/processed/final_training_data.csv`
+  - Merged+cleaned dataset used for training.
+  - Built from base dataset + latest corrections per text.
+
+### How to retrain
+
+1. Use the web app normally.
+2. In **Transactions** tab, fix any wrong categories (these go into `corrections_web.csv`).
+3. Build the final training data:
+
+   ```bash
+   python build_training_data.py
+
+
+Train the model:
+
+python train_category_model.py
+
+
+Reads: data/processed/final_training_data.csv
+
+Writes: models/category_model.joblib
+
+Restart the backend so it picks up the new model:
+
+python app.py

@@ -1,8 +1,18 @@
 import os
 from sqlalchemy import (
-    create_engine, Column, Integer, Float, String, DateTime, Boolean
+    create_engine,
+    Boolean,
+
+    Column,
+    Integer,
+    String,
+    Float,
+    DateTime,
+    Text,
+    ForeignKey,
 )
-from sqlalchemy.orm import declarative_base, sessionmaker
+
+from sqlalchemy.orm import declarative_base, sessionmaker,relationship
 from datetime import datetime
 
 DB_PATH = os.path.join("data", "expense_db.sqlite")
@@ -33,6 +43,16 @@ class User(Base):
     email = Column(String, unique=True, nullable=False)
     password_hash = Column(String, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
+class Budget(Base):
+    __tablename__ = "budgets"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    category = Column(String(50), nullable=False)
+    monthly_limit = Column(Float, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User", backref="budgets")
 
 
 def init_db():

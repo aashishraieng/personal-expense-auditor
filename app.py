@@ -11,15 +11,18 @@ from flask import (
     url_for,
     flash,
     jsonify,
+    Response,
 )
+
 from flask_cors import CORS
 
 from import_android_sms import parse_android_sms_xml
 from analyze_sms_file import classify_sms_file
 from summarize_expenses import summarize_with_amounts
-from db import SessionLocal, init_db, SMSMessage, User
+from db import SessionLocal, init_db, SMSMessage, User, Budget
 from auth_utils import hash_password, verify_password, make_token
 from sms_classifier import classify_sms_text, extract_amount
+from sqlalchemy import func
 
 
 
@@ -1005,6 +1008,499 @@ def api_stats():
         )
     except Exception as e:
         print("[API STATS][ERROR]", e)
+        return jsonify({"error": "server"}), 500
+    finally:
+        session.close()
+
+@app.route("/api/export", methods=["GET"])
+def api_export():
+    """
+    Export all transactions for the current user as a CSV file.
+
+    Columns: id, date, category, amount, text
+    """
+    user_id = get_user_id_from_request()
+    if not user_id:
+        return jsonify({"error": "unauthorized"}), 401
+
+    session = SessionLocal()
+    try:
+        rows = (
+            session.query(SMSMessage)
+            .filter(
+                SMSMessage.user_id == user_id,
+                SMSMessage.amount.isnot(None),
+                SMSMessage.amount > 0,
+            )
+            .order_by(SMSMessage.date.asc().nullslast(), SMSMessage.id.asc())
+            .all()
+        )
+
+        if not rows:
+            # Still return a CSV header, but empty body
+            header = "id,date,category,amount,text\n"
+            return Response(
+                header,
+                mimetype="text/csv",
+                headers={
+                    "Content-Disposition": 'attachment; filename="transactions_export.csv"'
+                },
+            )
+
+        # Build CSV lines manually (avoid needing pandas just for this)
+        lines = ["id,date,category,amount,text"]
+        for msg in rows:
+            msg_id = msg.id
+            date_str = msg.date.isoformat(sep=" ") if msg.date else ""
+            category = msg.category or ""
+            amount = float(msg.amount or 0.0)
+            text = msg.text or ""
+
+            # Escape double quotes in text
+            safe_text = text.replace('"', '""')
+
+            line = f'{msg_id},"{date_str}","{category}",{amount},"{safe_text}"'
+            lines.append(line)
+
+        csv_content = "\n".join(lines) + "\n"
+
+        return Response(
+            csv_content,
+            mimetype="text/csv",
+            headers={
+                "Content-Disposition": 'attachment; filename="transactions_export.csv"'
+            },
+        )
+
+    except Exception as e:
+        print("[API EXPORT][ERROR]", e)
+        return jsonify({"error": "server"}), 500
+    finally:
+        session.close()
+@app.route("/api/monthly-summary", methods=["GET"])
+def api_monthly_summary():
+    """
+    Return per-month totals for current user:
+      - spent (Debit + Shopping/UPI)
+      - income (Credit + Refund)
+      - net (income - spent)
+
+    Response:
+    {
+      "items": [
+        { "month": "2025-05", "spent": 123.0, "income": 456.0, "net": 333.0 },
+        ...
+      ]
+    }
+    """
+    user_id = get_user_id_from_request()
+    if not user_id:
+        return jsonify({"error": "unauthorized"}), 401
+
+    session = SessionLocal()
+    try:
+        # SQLite: use strftime to group by YYYY-MM
+        q = (
+            session.query(
+                func.strftime("%Y-%m", SMSMessage.date).label("ym"),
+                SMSMessage.category,
+                func.sum(SMSMessage.amount).label("total"),
+            )
+            .filter(
+                SMSMessage.user_id == user_id,
+                SMSMessage.amount.isnot(None),
+                SMSMessage.amount > 0,
+                SMSMessage.date.isnot(None),
+            )
+            .group_by("ym", SMSMessage.category)
+        )
+
+        rows = q.all()
+        if not rows:
+            return jsonify({"items": []})
+
+        # Aggregate into per-month spent/income
+        month_map = {}  # ym -> {"spent": x, "income": y}
+        for ym, category, total in rows:
+            if ym is None:
+                continue
+            amt = float(total or 0.0)
+            if ym not in month_map:
+                month_map[ym] = {"spent": 0.0, "income": 0.0}
+
+            if category in ["Debit", "Shopping/UPI"]:
+                month_map[ym]["spent"] += amt
+            elif category in ["Credit", "Refund"]:
+                month_map[ym]["income"] += amt
+            else:
+                # Other / Account/Service / Travel don't affect spent/income here
+                pass
+
+        # Build sorted list
+        items = []
+        for ym in sorted(month_map.keys()):
+            spent = month_map[ym]["spent"]
+            income = month_map[ym]["income"]
+            items.append(
+                {
+                    "month": ym,
+                    "spent": float(spent),
+                    "income": float(income),
+                    "net": float(income - spent),
+                }
+            )
+
+        return jsonify({"items": items})
+
+    except Exception as e:
+        print("[API MONTHLY SUMMARY][ERROR]", e)
+        return jsonify({"error": "server"}), 500
+    finally:
+        session.close()
+@app.route("/api/insights", methods=["GET"])
+def api_insights():
+    """
+    Return simple insights for a given month (or latest month if not provided).
+
+    Query params:
+      - month=YYYY-MM (optional). If omitted, use latest month in DB.
+
+    Response example:
+    {
+      "month": "2025-09",
+      "total_spent": 86247.02,
+      "total_income": 61615.62,
+      "net": -24631.40,
+      "top_category": {
+        "category": "Shopping/UPI",
+        "amount": 45000.0
+      },
+      "spikes": [
+        {
+          "category": "Travel",
+          "current": 8000.0,
+          "avg_previous": 2000.0,
+          "ratio": 4.0
+        }
+      ]
+    }
+    """
+    user_id = get_user_id_from_request()
+    if not user_id:
+        return jsonify({"error": "unauthorized"}), 401
+
+    session = SessionLocal()
+    try:
+        # 1) Determine month to use
+        month = request.args.get("month")
+
+        if not month:
+            # Find latest month with transactions for this user
+            latest = (
+                session.query(func.strftime("%Y-%m", SMSMessage.date))
+                .filter(
+                    SMSMessage.user_id == user_id,
+                    SMSMessage.amount.isnot(None),
+                    SMSMessage.amount > 0,
+                    SMSMessage.date.isnot(None),
+                )
+                .order_by(SMSMessage.date.desc())
+                .first()
+            )
+            if not latest or not latest[0]:
+                return jsonify(
+                    {
+                        "month": None,
+                        "total_spent": 0.0,
+                        "total_income": 0.0,
+                        "net": 0.0,
+                        "top_category": None,
+                        "spikes": [],
+                    }
+                )
+            month = latest[0]
+
+        # 2) Get all rows for this user & this month
+        cur_rows = (
+            session.query(SMSMessage)
+            .filter(
+                SMSMessage.user_id == user_id,
+                SMSMessage.amount.isnot(None),
+                SMSMessage.amount > 0,
+                SMSMessage.date.isnot(None),
+                SMSMessage.date.like(f"{month}-%"),
+            )
+            .all()
+        )
+
+        if not cur_rows:
+            return jsonify(
+                {
+                    "month": month,
+                    "total_spent": 0.0,
+                    "total_income": 0.0,
+                    "net": 0.0,
+                    "top_category": None,
+                    "spikes": [],
+                }
+            )
+
+        # 3) Compute totals + category spend for this month
+        total_spent = 0.0
+        total_income = 0.0
+        cat_totals = {}  # category -> amount (for "spent" categories only)
+
+        for msg in cur_rows:
+            cat = msg.category
+            amt = float(msg.amount or 0.0)
+
+            if cat in ["Debit", "Shopping/UPI"]:
+                total_spent += amt
+                cat_totals[cat] = cat_totals.get(cat, 0.0) + amt
+            elif cat in ["Credit", "Refund"]:
+                total_income += amt
+
+        net = total_income - total_spent
+
+        # 4) Top spend category (within spend categories)
+        top_category = None
+        if cat_totals:
+            cat_name, cat_amt = max(cat_totals.items(), key=lambda kv: kv[1])
+            top_category = {"category": cat_name, "amount": float(cat_amt)}
+
+        # 5) Spike detection: compare this month vs average of previous months
+        #    per category among spend categories only.
+        #    We'll consider it a "spike" if current >= 1.5 * avg_previous
+        #    and avg_previous > 0.
+        # Get past months aggregated by category
+        past_q = (
+            session.query(
+                func.strftime("%Y-%m", SMSMessage.date).label("ym"),
+                SMSMessage.category,
+                func.sum(SMSMessage.amount).label("total"),
+            )
+            .filter(
+                SMSMessage.user_id == user_id,
+                SMSMessage.amount.isnot(None),
+                SMSMessage.amount > 0,
+                SMSMessage.date.isnot(None),
+                func.strftime("%Y-%m", SMSMessage.date) < month,
+                SMSMessage.category.in_(["Debit", "Shopping/UPI"]),
+            )
+            .group_by("ym", SMSMessage.category)
+        )
+
+        past_rows = past_q.all()
+
+        # Build: cat -> [month_totals...]
+        past_by_cat = {}
+        for ym, cat, total in past_rows:
+            if ym is None or cat is None:
+                continue
+            amt = float(total or 0.0)
+            lst = past_by_cat.setdefault(cat, [])
+            lst.append(amt)
+
+        spikes = []
+        for cat, cur_amt in cat_totals.items():
+            past_vals = past_by_cat.get(cat, [])
+            if not past_vals:
+                continue  # no history, can't detect spike
+            avg_prev = sum(past_vals) / len(past_vals)
+            if avg_prev <= 0:
+                continue
+            ratio = cur_amt / avg_prev
+            if ratio >= 1.5:
+                spikes.append(
+                    {
+                        "category": cat,
+                        "current": float(cur_amt),
+                        "avg_previous": float(avg_prev),
+                        "ratio": float(round(ratio, 2)),
+                    }
+                )
+
+        # Sort spikes by ratio descending
+        spikes.sort(key=lambda x: x["ratio"], reverse=True)
+
+        return jsonify(
+            {
+                "month": month,
+                "total_spent": float(total_spent),
+                "total_income": float(total_income),
+                "net": float(net),
+                "top_category": top_category,
+                "spikes": spikes,
+            }
+        )
+
+    except Exception as e:
+        print("[API INSIGHTS][ERROR]", e)
+        return jsonify({"error": "server"}), 500
+    finally:
+        session.close()
+@app.route("/api/budgets", methods=["GET"])
+def api_get_budgets():
+    user_id = get_user_id_from_request()
+    if not user_id:
+        return jsonify({"error": "unauthorized"}), 401
+
+    session = SessionLocal()
+    try:
+        budgets = (
+            session.query(Budget)
+            .filter(Budget.user_id == user_id)
+            .order_by(Budget.category.asc())
+            .all()
+        )
+
+        items = []
+        for b in budgets:
+            items.append({
+                "id": b.id,
+                "category": b.category,
+                "monthly_limit": float(b.monthly_limit),
+            })
+
+        return jsonify({"items": items})
+    except Exception as e:
+        print("[API BUDGETS][GET ERROR]", e)
+        return jsonify({"error": "server"}), 500
+    finally:
+        session.close()
+
+@app.route("/api/budgets", methods=["POST"])
+def api_set_budgets():
+    user_id = get_user_id_from_request()
+    if not user_id:
+        return jsonify({"error": "unauthorized"}), 401
+
+    data = request.get_json(silent=True) or {}
+    items = data.get("items")
+    if not isinstance(items, list):
+        return jsonify({"error": "invalid_payload"}), 400
+
+    cleaned = []
+    for item in items:
+        cat = str(item.get("category", "")).strip()
+        try:
+            limit = float(item.get("monthly_limit", 0.0))
+        except:
+            limit = 0.0
+
+        if not cat or limit <= 0:
+            continue
+
+        cleaned.append({"category": cat, "monthly_limit": limit})
+
+    session = SessionLocal()
+    try:
+        session.query(Budget).filter(Budget.user_id == user_id).delete()
+        for b in cleaned:
+            session.add(Budget(
+                user_id=user_id,
+                category=b["category"],
+                monthly_limit=b["monthly_limit"],
+            ))
+        session.commit()
+        return jsonify({"status": "ok", "count": len(cleaned)})
+    except Exception as e:
+        print("[API BUDGETS][POST ERROR]", e)
+        session.rollback()
+        return jsonify({"error": "server"}), 500
+    finally:
+        session.close()
+@app.route("/api/recurring", methods=["GET"])
+def api_recurring():
+    """
+    Detect simple recurring payments for the current user.
+
+    Logic:
+      - consider only Debit + Shopping/UPI
+      - group by (category, rounded amount)
+      - if there are >= 3 payments and span between first/last is >= 60 days,
+        treat as a probable recurring payment.
+
+    Response:
+    {
+      "items": [
+        {
+          "category": "Debit",
+          "amount": 499.0,
+          "count": 6,
+          "first_date": "2025-05-01 10:30:00",
+          "last_date": "2025-10-01 10:30:00",
+          "span_days": 153
+        },
+        ...
+      ]
+    }
+    """
+    user_id = get_user_id_from_request()
+    if not user_id:
+        return jsonify({"error": "unauthorized"}), 401
+
+    session = SessionLocal()
+    try:
+        rows = (
+            session.query(SMSMessage)
+            .filter(
+                SMSMessage.user_id == user_id,
+                SMSMessage.amount.isnot(None),
+                SMSMessage.amount > 0,
+                SMSMessage.date.isnot(None),
+                SMSMessage.category.in_(["Debit", "Shopping/UPI"]),
+            )
+            .order_by(SMSMessage.date.asc())
+            .all()
+        )
+
+        if not rows:
+            return jsonify({"items": []})
+
+        # Build groups: key = (category, rounded_amount)
+        groups = {}
+        for msg in rows:
+            amt = float(msg.amount or 0.0)
+            # round to nearest rupee to avoid tiny differences
+            rounded = round(amt)
+            key = (msg.category, rounded)
+            lst = groups.setdefault(key, [])
+            lst.append(msg)
+
+        candidates = []
+        for (cat, rounded_amount), msgs in groups.items():
+            if len(msgs) < 3:
+                continue
+
+            # sort by date
+            msgs_sorted = sorted(msgs, key=lambda m: m.date)
+            first_date = msgs_sorted[0].date
+            last_date = msgs_sorted[-1].date
+            span_days = (last_date - first_date).days if first_date and last_date else 0
+
+            # Require at least ~2 months span
+            if span_days < 60:
+                continue
+
+            candidates.append(
+                {
+                    "category": cat,
+                    "amount": float(rounded_amount),
+                    "count": len(msgs_sorted),
+                    "first_date": first_date.isoformat(sep=" ") if first_date else None,
+                    "last_date": last_date.isoformat(sep=" ") if last_date else None,
+                    "span_days": span_days,
+                }
+            )
+
+        # Sort by count desc, then amount desc
+        candidates.sort(key=lambda x: (-x["count"], -x["amount"]))
+
+        return jsonify({"items": candidates})
+
+    except Exception as e:
+        print("[API RECURRING][ERROR]", e)
         return jsonify({"error": "server"}), 500
     finally:
         session.close()
