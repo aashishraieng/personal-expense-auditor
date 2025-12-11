@@ -51,7 +51,64 @@ function App() {
   const [budgetsError, setBudgetsError] = useState("");
  // ---- Recurring payments state ----
   const [recurring, setRecurring] = useState([]);
+
+  // current-month totals returned by /api/current-month-totals
+const [currentMonthTotals, setCurrentMonthTotals] = useState({});
+const [currentMonthTotalsLoading, setCurrentMonthTotalsLoading] = useState(false);
+
+
+  // ---- Alerts state ----
+  const [alerts, setAlerts] = useState([]);
+  const [alertsLoading, setAlertsLoading] = useState(false);
+
   // ---- Helpers ----
+
+   // ---- Alerts fetch ----
+  const fetchAlerts = async () => {
+    if (!token) return;
+    setAlertsLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/alerts`, {
+        headers: authHeaders(),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setAlerts([]);
+        return;
+      }
+      setAlerts(data.items || []);
+    } catch (err) {
+      console.error(err);
+      setAlerts([]);
+    } finally {
+      setAlertsLoading(false);
+    }
+  };
+
+  const fetchCurrentMonthTotals = async (monthValue) => {
+  if (!token) return;
+  setCurrentMonthTotalsLoading(true);
+  try {
+    let url = `${API_BASE}/api/current-month-totals`;
+    if (monthValue && monthValue !== "all") {
+      url += `?month=${monthValue}`;
+    }
+    const res = await fetch(url, { headers: authHeaders() });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      console.error("Failed to load current month totals", data);
+      setCurrentMonthTotals({});
+      return;
+    }
+    setCurrentMonthTotals(data.totals || {});
+  } catch (err) {
+    console.error(err);
+    setCurrentMonthTotals({});
+  } finally {
+    setCurrentMonthTotalsLoading(false);
+  }
+};
+
       const fetchRecurring = async () => {
     if (!token) return;
     try {
@@ -331,7 +388,13 @@ function App() {
       if (resMe.ok) {
         const me = await resMe.json();
         setCurrentUser(me);
+        if (me.is_admin) {
+          setIsAdmin(true);   // create this state in App.jsx: const [isAdmin, setIsAdmin] = useState(false)
+        } else {
+          setIsAdmin(false);
+        }
       }
+
 
       setSummary(null);
       setCategoryTotals({});
@@ -426,6 +489,8 @@ function App() {
       fetchInsights(selectedMonth);
       fetchBudgets();
       fetchRecurring();
+      fetchCurrentMonthTotals(selectedMonth);
+      fetchAlerts(); // <-- fetch alerts here
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedMonth, token]);
@@ -679,6 +744,7 @@ function App() {
         authLoading={authLoading}
         onLogin={handleLogin}
         onSignup={handleSignup}
+        
       />
     );
   }
@@ -692,6 +758,8 @@ function App() {
         onChangeTab={setActiveTab}
         currentUser={currentUser}
         onLogout={handleLogout}
+        alerts={alerts}                 // <-- pass alerts
+        refreshAlerts={fetchAlerts}
       />
 
       <main className="main">
@@ -714,6 +782,7 @@ function App() {
             insights={insights}
             budgets={budgets}
             recurring={recurring}
+            currentMonthTotals={currentMonthTotals}
           />
         )}
 

@@ -22,14 +22,14 @@ function Dashboard({
   insights,
   budgets,
   recurring,
+  currentMonthTotals,
 }) {
-
   const monthLabel = (m) => {
     if (!m || m === "all") return "All time";
     return m;
   };
 
-  // --- Top category & net, preferring backend insights when available ---
+  // --- Top category & net, prefer backend insights when available ---
   let topCategory = null;
   let topCategoryAmount = 0;
 
@@ -68,13 +68,18 @@ function Dashboard({
 
   const hasMonthlyData = monthlyChartData.length > 0;
 
-  // --- Budgets & warnings ---
+  // --- Budgets & warnings: use currentMonthTotals when available ---
+  const monthTotals =
+    currentMonthTotals && Object.keys(currentMonthTotals).length > 0
+      ? currentMonthTotals
+      : categoryTotals || {};
+
   const budgetList = Array.isArray(budgets) ? budgets : [];
 
   const budgetRows = budgetList.map((b) => {
     const cat = b.category;
     const limit = Number(b.monthly_limit || 0);
-    const spent = Number(categoryTotals?.[cat] || 0);
+    const spent = Number(monthTotals?.[cat] || 0);
     const ratio = limit > 0 ? spent / limit : 0;
     let status = "ok";
     if (ratio >= 1) status = "over";
@@ -87,9 +92,9 @@ function Dashboard({
       status,
     };
   });
-    // --- Recurring payments ---
-  const recurringItems = Array.isArray(recurring) ? recurring : [];
 
+  // --- Recurring payments ---
+  const recurringItems = Array.isArray(recurring) ? recurring : [];
 
   return (
     <>
@@ -140,9 +145,7 @@ function Dashboard({
               ₹{summary.total_income.toFixed(2)}
             </div>
           </div>
-          <div
-            className={`card ${net < 0 ? "negative" : "positive"}`}
-          >
+          <div className={`card ${net < 0 ? "negative" : "positive"}`}>
             <div className="card-label">Net (In - Spent)</div>
             <div className="card-value">₹{net.toFixed(2)}</div>
           </div>
@@ -172,39 +175,33 @@ function Dashboard({
             )}
             <li>
               Net position for <b>{monthLabel(selectedMonth)}</b> is{" "}
-              <b
-                style={{
-                  color: net >= 0 ? "#16a34a" : "#b91c1c",
-                }}
-              >
+              <b style={{ color: net >= 0 ? "#16a34a" : "#b91c1c" }}>
                 ₹{net.toFixed(2)}
               </b>{" "}
               ({net >= 0 ? "surplus" : "deficit"}).
             </li>
+
             {insights &&
               Array.isArray(insights.spikes) &&
-              insights.spikes.length > 0 && (
-                <>
-                  {insights.spikes.map((s) => (
-                    <li key={s.category}>
-                      Spending in <b>{s.category}</b> is about{" "}
-                      <b>
-                        {s.ratio && s.ratio.toFixed
-                          ? s.ratio.toFixed(1)
-                          : s.ratio}
-                        ×
-                      </b>{" "}
-                      your usual average (₹
-                      {s.current.toFixed ? s.current.toFixed(2) : s.current} vs
-                      avg previous ₹
-                      {s.avg_previous && s.avg_previous.toFixed
-                        ? s.avg_previous.toFixed(2)
-                        : s.avg_previous}
-                      ).
-                    </li>
-                  ))}
-                </>
-              )}
+              insights.spikes.length > 0 &&
+              insights.spikes.map((s) => (
+                <li key={s.category}>
+                  Spending in <b>{s.category}</b> is about{" "}
+                  <b>
+                    {typeof s.ratio === "number" ? s.ratio.toFixed(1) : s.ratio}
+                    ×
+                  </b>{" "}
+                  your usual average (₹
+                  {s.current && s.current.toFixed
+                    ? s.current.toFixed(2)
+                    : s.current}
+                  vs avg previous ₹
+                  {s.avg_previous && s.avg_previous.toFixed
+                    ? s.avg_previous.toFixed(2)
+                    : s.avg_previous}
+                  ).
+                </li>
+              ))}
           </ul>
         </section>
       )}
@@ -270,10 +267,7 @@ function Dashboard({
                         <span
                           style={{
                             fontSize: "0.8rem",
-                            color:
-                              row.status === "over"
-                                ? "#b91c1c"
-                                : "#4b5563",
+                            color: row.status === "over" ? "#b91c1c" : "#4b5563",
                             whiteSpace: "nowrap",
                           }}
                         >
@@ -294,7 +288,7 @@ function Dashboard({
         </section>
       )}
 
-            {/* Recurring payments */}
+      {/* Recurring payments */}
       {summary && recurringItems.length > 0 && (
         <section className="card">
           <h2>Recurring payments</h2>
@@ -317,7 +311,12 @@ function Dashboard({
               {recurringItems.map((item, idx) => (
                 <tr key={`${item.category}-${item.amount}-${idx}`}>
                   <td>{item.category}</td>
-                  <td>₹{item.amount.toFixed ? item.amount.toFixed(2) : item.amount}</td>
+                  <td>
+                    ₹
+                    {typeof item.amount === "number"
+                      ? item.amount.toFixed(2)
+                      : item.amount}
+                  </td>
                   <td>{item.count}</td>
                   <td>{item.first_date || "-"}</td>
                   <td>{item.last_date || "-"}</td>
@@ -327,7 +326,6 @@ function Dashboard({
           </table>
         </section>
       )}
-
 
       {/* Monthly trend charts */}
       {hasMonthlyData && (
@@ -347,13 +345,7 @@ function Dashboard({
           >
             {/* Net line chart */}
             <div style={{ width: "100%", height: 260 }}>
-              <h3
-                style={{
-                  fontSize: "0.9rem",
-                  marginBottom: 4,
-                  color: "#4b5563",
-                }}
-              >
+              <h3 style={{ fontSize: "0.9rem", marginBottom: 4, color: "#4b5563" }}>
                 Net balance per month
               </h3>
               <ResponsiveContainer width="100%" height="100%">
@@ -375,13 +367,7 @@ function Dashboard({
 
             {/* Spent vs Income bar chart */}
             <div style={{ width: "100%", height: 260 }}>
-              <h3
-                style={{
-                  fontSize: "0.9rem",
-                  marginBottom: 4,
-                  color: "#4b5563",
-                }}
-              >
+              <h3 style={{ fontSize: "0.9rem", marginBottom: 4, color: "#4b5563" }}>
                 Spent vs Income
               </h3>
               <ResponsiveContainer width="100%" height="100%">
@@ -454,13 +440,7 @@ function Dashboard({
                     }}
                   />
                 </div>
-                <div
-                  style={{
-                    width: 80,
-                    textAlign: "right",
-                    color: "#4b5563",
-                  }}
-                >
+                <div style={{ width: 80, textAlign: "right", color: "#4b5563" }}>
                   ₹{amt.toFixed(0)}
                 </div>
               </div>

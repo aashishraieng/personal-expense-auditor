@@ -23,8 +23,12 @@ from db import SessionLocal, init_db, SMSMessage, User, Budget
 from auth_utils import hash_password, verify_password, make_token
 from sms_classifier import classify_sms_text, extract_amount
 from sqlalchemy import func
-
-
+import secrets
+from sqlalchemy.exc import NoResultFound
+import subprocess
+import json
+import shlex
+from datetime import datetime
 
 from joblib import load
 import re
@@ -53,12 +57,21 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 SUMMARY_JSON = os.path.join("data", "processed", "web_summary.json")
 CORRECTIONS_CSV = os.path.join("data", "processed", "corrections_web.csv")
+RETRAIN_STATUS_PATH = os.path.join("data", "processed", "retrain_status.json")
 
 ALLOWED_EXTENSIONS = {"xml", "csv"}
 
 # -----------------------------------------------------------------------------
 # Helpers
 # -----------------------------------------------------------------------------
+
+def _get_user_by_id(session, user_id):
+    try:
+        return session.get(User, int(user_id))
+    except Exception:
+        return None
+    
+
 def allowed_file(filename: str) -> bool:
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
@@ -270,6 +283,186 @@ UPLOAD_PAGE = """
 # -----------------------------------------------------------------------------
 # Auth routes
 # -----------------------------------------------------------------------------
+def _save_retrain_status(status: dict):
+    os.makedirs(os.path.dirname(RETRAIN_STATUS_PATH), exist_ok=True)
+    with open(RETRAIN_STATUS_PATH, "w", encoding="utf-8") as f:
+        json.dump(status, f, ensure_ascii=False, indent=2)
+
+def _load_retrain_status():
+    if not os.path.exists(RETRAIN_STATUS_PATH):
+        return None
+    try:
+        return json.load(open(RETRAIN_STATUS_PATH, "r", encoding="utf-8"))
+    except Exception:
+        return None
+
+@app.route("/api/retrain", methods=["POST"])
+def api_retrain():
+    """
+    Admin-only: trigger model retraining.
+    Runs the existing training script as a subprocess.
+    Returns start/end time, success flag and captured logs.
+    """
+    user_id = get_user_id_from_request()
+    if not user_id:
+        return jsonify({"error": "unauthorized"}), 401
+
+    session = SessionLocal()
+    try:
+        caller = session.get(User, user_id)
+        if not caller or not getattr(caller, "is_admin", False):
+            return jsonify({"error": "forbidden"}), 403
+    finally:
+        session.close()
+
+    start_ts = datetime.utcnow().isoformat()
+    status = {
+        "status": "running",
+        "started_at": start_ts,
+        "finished_at": None,
+        "success": False,
+        "message": None,
+        "stdout": "",
+        "stderr": "",
+    }
+    _save_retrain_status(status)
+
+    # Compose command to run your training script. Adjust if script name differs.
+    # Using shlex for safe tokenization; use full python path if needed
+    cmd = "python train_category_model.py"
+
+    try:
+        # Run synchronously and capture output
+        proc = subprocess.run(
+            shlex.split(cmd),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=os.getcwd(),
+            timeout=60*60  # 1 hour timeout (adjust if necessary)
+        )
+        stdout = proc.stdout.decode("utf-8", errors="replace")
+        stderr = proc.stderr.decode("utf-8", errors="replace")
+        success = proc.returncode == 0
+
+        status.update({
+            "status": "finished",
+            "finished_at": datetime.utcnow().isoformat(),
+            "success": success,
+            "message": "completed" if success else f"failed (code {proc.returncode})",
+            "stdout": stdout[-20000:],   # keep last N chars to avoid huge JSON
+            "stderr": stderr[-20000:],
+        })
+        _save_retrain_status(status)
+
+        return jsonify({
+            "status": status["status"],
+            "success": status["success"],
+            "message": status["message"],
+            "started_at": status["started_at"],
+            "finished_at": status["finished_at"],
+        })
+
+    except subprocess.TimeoutExpired as te:
+        status.update({
+            "status": "timeout",
+            "finished_at": datetime.utcnow().isoformat(),
+            "success": False,
+            "message": "timeout",
+            "stdout": "",
+            "stderr": str(te),
+        })
+        _save_retrain_status(status)
+        return jsonify({"error": "timeout"}), 500
+    except Exception as e:
+        status.update({
+            "status": "error",
+            "finished_at": datetime.utcnow().isoformat(),
+            "success": False,
+            "message": str(e),
+        })
+        _save_retrain_status(status)
+        return jsonify({"error": "server", "details": str(e)}), 500
+
+
+@app.route("/api/retrain/status", methods=["GET"])
+def api_retrain_status():
+    """
+    Return last retrain status JSON (or 404 if never run).
+    """
+    st = _load_retrain_status()
+    if not st:
+        return jsonify({"status": "never_run"}), 404
+    return jsonify(st)
+
+
+
+
+@app.route("/admin/users", methods=["GET"])
+def admin_list_users():
+    user_id = get_user_id_from_request()
+    if not user_id:
+        return jsonify({"error": "unauthorized"}), 401
+
+    session = SessionLocal()
+    try:
+        caller = _get_user_by_id(session, user_id)
+        if not caller or not getattr(caller, "is_admin", False):
+            return jsonify({"error": "forbidden"}), 403
+
+        users = session.query(User).order_by(User.id.asc()).all()
+        items = []
+        for u in users:
+            items.append({
+                "id": u.id,
+                "email": u.email,
+                "created_at": u.created_at.isoformat() if u.created_at else None,
+                "is_admin": bool(u.is_admin),
+            })
+        return jsonify({"items": items})
+    except Exception as e:
+        print("[ADMIN USERS][ERROR]", e)
+        return jsonify({"error": "server"}), 500
+    finally:
+        session.close()
+
+@app.route("/auth/grant-admin", methods=["POST"])
+def auth_grant_admin():
+    user_id = get_user_id_from_request()
+    if not user_id:
+        return jsonify({"error": "unauthorized"}), 401
+
+    session = SessionLocal()
+    try:
+        caller = _get_user_by_id(session, user_id)
+        if not caller or not getattr(caller, "is_admin", False):
+            return jsonify({"error": "forbidden"}), 403
+
+        data = request.json or {}
+        target_email = (data.get("email") or "").strip().lower()
+        if not target_email:
+            return jsonify({"error": "missing_email"}), 400
+
+        target = session.query(User).filter_by(email=target_email).first()
+        if not target:
+            # create placeholder with random password
+            from auth_utils import hash_password
+            placeholder_password = secrets.token_urlsafe(16)
+            target = User(email=target_email, password_hash=hash_password(placeholder_password), is_admin=True)
+            session.add(target)
+            session.commit()
+            return jsonify({"status": "created_and_promoted", "email": target_email})
+        else:
+            if target.is_admin:
+                return jsonify({"status": "already_admin", "email": target_email})
+            target.is_admin = True
+            session.commit()
+            return jsonify({"status": "promoted", "email": target_email})
+    except Exception as e:
+        session.rollback()
+        print("[GRANT ADMIN][ERROR]", e)
+        return jsonify({"error": "server"}), 500
+    finally:
+        session.close()
 @app.route("/auth/signup", methods=["POST"])
 def signup():
     data = request.json or {}
@@ -335,10 +528,6 @@ def login():
 
 @app.route("/auth/me", methods=["GET"])
 def auth_me():
-    """
-    Return basic info about the currently authenticated user.
-    Requires Authorization: Bearer <token> header.
-    """
     user_id = get_user_id_from_request()
     if not user_id:
         return jsonify({"error": "unauthorized"}), 401
@@ -349,15 +538,12 @@ def auth_me():
         if not user:
             return jsonify({"error": "unauthorized"}), 401
 
-        return jsonify(
-            {
-                "id": user.id,
-                "email": user.email,
-                "created_at": user.created_at.isoformat()
-                if user.created_at
-                else None,
-            }
-        )
+        return jsonify({
+            "id": user.id,
+            "email": user.email,
+            "created_at": user.created_at.isoformat() if user.created_at else None,
+            "is_admin": bool(getattr(user, "is_admin", False)),
+        })
     except Exception as e:
         print("[AUTH ME ERROR]", e)
         return jsonify({"error": "server"}), 500
@@ -1504,9 +1690,257 @@ def api_recurring():
         return jsonify({"error": "server"}), 500
     finally:
         session.close()
+@app.route("/api/current-month-totals", methods=["GET"])
+def api_current_month_totals():
+    """
+    Return total spent per category for a given month (or latest month if none provided).
+    Query params:
+      - month=YYYY-MM   (optional) — if omitted, backend uses the latest month available for user
+    Response:
+    {
+      "month": "2025-12",
+      "totals": {
+        "Debit": 14500.50,
+        "Shopping/UPI": 3200.00,
+        "Travel": 500.00,
+        "Other": 0.0
+      }
+    }
+    """
+    user_id = get_user_id_from_request()
+    if not user_id:
+        return jsonify({"error": "unauthorized"}), 401
+
+    month = request.args.get("month")
+    session = SessionLocal()
+    try:
+        # If month not provided, pick the latest month that the user has data for
+        if not month:
+            latest = (
+                session.query(func.strftime("%Y-%m", SMSMessage.date))
+                .filter(
+                    SMSMessage.user_id == user_id,
+                    SMSMessage.amount.isnot(None),
+                    SMSMessage.amount > 0,
+                    SMSMessage.date.isnot(None),
+                )
+                .order_by(SMSMessage.date.desc())
+                .first()
+            )
+            if not latest or not latest[0]:
+                return jsonify({"month": None, "totals": {}})
+
+            month = latest[0]
+
+        # Aggregate sums grouped by category for that month
+        q = (
+            session.query(
+                SMSMessage.category,
+                func.sum(SMSMessage.amount).label("total"),
+            )
+            .filter(
+                SMSMessage.user_id == user_id,
+                SMSMessage.amount.isnot(None),
+                SMSMessage.amount > 0,
+                SMSMessage.date.isnot(None),
+                func.strftime("%Y-%m", SMSMessage.date) == month,
+            )
+            .group_by(SMSMessage.category)
+        )
+
+        rows = q.all()
+
+        totals = {}
+        for category, total in rows:
+            totals[category] = float(total or 0.0)
+
+        # Ensure common categories exist (so frontend doesn't crash)
+        common = ["Debit", "Shopping/UPI", "Credit", "Refund", "Travel", "Account/Service", "Other"]
+        for c in common:
+            totals.setdefault(c, 0.0)
+
+        return jsonify({"month": month, "totals": totals})
+
+    except Exception as e:
+        print("[API CURRENT MONTH TOTALS][ERROR]", e)
+        return jsonify({"error": "server"}), 500
+    finally:
+        session.close()
+@app.route("/api/alerts", methods=["GET"])
+def api_alerts():
+    """
+    Return active alerts for the current user:
+      - budget warnings/overages (uses budgets + current month totals)
+      - recurring payments (informational)
+
+    Response:
+    {
+      "items": [
+        {
+          "id": "budget-Shopping/UPI-warning",
+          "type": "budget",
+          "category": "Shopping/UPI",
+          "message": "You have used 78% of your Shopping/UPI budget (₹7800 / ₹10000).",
+          "severity": "warning",
+          "created_at": "2025-12-09T12:34:56Z"
+        },
+        {
+          "id": "recurring-Debit-499",
+          "type": "recurring",
+          "category": "Debit",
+          "message": "Probable recurring payment: Debit ₹499 seen 5 times (first: 2025-05-01, last: 2025-10-01).",
+          "severity": "info",
+          "created_at": "2025-12-09T12:34:56Z"
+        }
+      ]
+    }
+    """
+    user_id = get_user_id_from_request()
+    if not user_id:
+        return jsonify({"error": "unauthorized"}), 401
+
+    session = SessionLocal()
+    try:
+        # 1) Load budgets for this user
+        budgets = (
+            session.query(Budget)
+            .filter(Budget.user_id == user_id)
+            .all()
+        )
+
+        # 2) Determine month to use (latest with data) — reuse logic
+        latest = (
+            session.query(func.strftime("%Y-%m", SMSMessage.date))
+            .filter(
+                SMSMessage.user_id == user_id,
+                SMSMessage.amount.isnot(None),
+                SMSMessage.amount > 0,
+                SMSMessage.date.isnot(None),
+            )
+            .order_by(SMSMessage.date.desc())
+            .first()
+        )
+        month = latest[0] if latest and latest[0] else None
+
+        # 3) Get current-month totals grouped by category
+        month_totals = {}
+        if month:
+            q = (
+                session.query(
+                    SMSMessage.category,
+                    func.sum(SMSMessage.amount).label("total"),
+                )
+                .filter(
+                    SMSMessage.user_id == user_id,
+                    SMSMessage.amount.isnot(None),
+                    SMSMessage.amount > 0,
+                    SMSMessage.date.isnot(None),
+                    func.strftime("%Y-%m", SMSMessage.date) == month,
+                )
+                .group_by(SMSMessage.category)
+            )
+            for cat, total in q.all():
+                month_totals[cat] = float(total or 0.0)
+
+        # Ensure budgets list is iterable
+        budget_items = budgets or []
+
+        alerts = []
+        now_iso = datetime.utcnow().isoformat() + "Z"
+
+        # 4) Budget alerts
+        for b in budget_items:
+            cat = b.category
+            limit = float(b.monthly_limit or 0.0)
+            spent = float(month_totals.get(cat, 0.0))
+            if limit <= 0:
+                continue
+            ratio = spent / limit
+            # warning threshold (>=0.75)
+            if ratio >= 1.0:
+                severity = "critical"
+                msg = f"You have exceeded your {cat} budget: ₹{spent:.2f} / ₹{limit:.2f}."
+            elif ratio >= 0.75:
+                severity = "warning"
+                msg = f"You have used {ratio*100:.0f}% of your {cat} budget (₹{spent:.2f} / ₹{limit:.2f})."
+            else:
+                continue
+
+            alerts.append({
+                "id": f"budget-{cat}-{ 'over' if ratio>=1.0 else 'warn' }",
+                "type": "budget",
+                "category": cat,
+                "message": msg,
+                "severity": severity,
+                "created_at": now_iso,
+            })
+
+        # 5) Recurring payment alerts (informational)
+        # Reuse the simple recurring detection logic inline (group by rounded amount)
+        rows = (
+            session.query(SMSMessage)
+            .filter(
+                SMSMessage.user_id == user_id,
+                SMSMessage.amount.isnot(None),
+                SMSMessage.amount > 0,
+                SMSMessage.date.isnot(None),
+                SMSMessage.category.in_(["Debit", "Shopping/UPI"]),
+            )
+            .order_by(SMSMessage.date.asc())
+            .all()
+        )
+
+        groups = {}
+        for msg in rows:
+            rounded = round(float(msg.amount or 0.0))
+            key = (msg.category, rounded)
+            groups.setdefault(key, []).append(msg)
+
+        for (cat, amt), msgs in groups.items():
+            if len(msgs) < 3:
+                continue
+            msgs_sorted = sorted(msgs, key=lambda m: m.date)
+            first_date = msgs_sorted[0].date
+            last_date = msgs_sorted[-1].date
+            span_days = (last_date - first_date).days if first_date and last_date else 0
+            if span_days < 60:
+                continue
+            # Make an informational alert
+            msg_text = f"Probable recurring payment: {cat} ₹{amt} seen {len(msgs_sorted)} times (first: {first_date.strftime('%Y-%m-%d')}, last: {last_date.strftime('%Y-%m-%d')})."
+            alerts.append({
+                "id": f"recurring-{cat}-{amt}",
+                "type": "recurring",
+                "category": cat,
+                "message": msg_text,
+                "severity": "info",
+                "created_at": now_iso,
+            })
+
+        # Optional: sort alerts by severity then created_at (critical -> warning -> info)
+        severity_order = {"critical": 0, "warning": 1, "info": 2}
+        alerts.sort(key=lambda a: (severity_order.get(a.get("severity"), 3), a.get("created_at")), reverse=False)
+
+        return jsonify({"items": alerts})
+
+    except Exception as e:
+        print("[API ALERTS][ERROR]", e)
+        return jsonify({"error": "server"}), 500
+    finally:
+        session.close()
+
 
 # -----------------------------------------------------------------------------
 # Main
 # -----------------------------------------------------------------------------
+
+@app.route("/__routes__", methods=["GET"])
+def __routes__():
+    lines = []
+    for rule in sorted(app.url_map.iter_rules(), key=lambda r: r.rule):
+        methods = ",".join(sorted(rule.methods - {"HEAD","OPTIONS"}))
+        lines.append(f"{rule.rule:40}  ->  {methods}")
+    return "<pre>" + "\n".join(lines) + "</pre>"
+
+
 if __name__ == "__main__":
     app.run(host="127.0.0.1", port=5000, debug=True)

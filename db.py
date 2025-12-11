@@ -14,6 +14,7 @@ from sqlalchemy import (
 
 from sqlalchemy.orm import declarative_base, sessionmaker,relationship
 from datetime import datetime
+from sqlalchemy.sql import func
 
 DB_PATH = os.path.join("data", "expense_db.sqlite")
 os.makedirs("data", exist_ok=True)
@@ -38,11 +39,17 @@ class SMSMessage(Base):
 
 class User(Base):
     __tablename__ = "users"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    email = Column(String, unique=True, nullable=False)
+    id = Column(Integer, primary_key=True)
+    email = Column(String, unique=True, nullable=False, index=True)
     password_hash = Column(String, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, server_default=func.now())
+    # NEW:
+    is_admin = Column(Boolean, default=False, nullable=False)
+
+
+
+
+
 class Budget(Base):
     __tablename__ = "budgets"
 
