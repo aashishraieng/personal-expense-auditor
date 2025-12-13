@@ -1,5 +1,40 @@
+# ======================
+# Python
+# ======================
 __pycache__/
 *.pyc
-.ipynb_checkpoints/
+*.pyo
+*.pyd
+*.egg-info/
+.env
+venv/
+env/
+
+# ======================
+# OS / Editors
+# ======================
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# ======================
+# Databases
+# ======================
+*.db
+*.sqlite
+*.sqlite3
 data/
+
+# ======================
+# ML Models / Artifacts
+# ======================
 models/
+*.joblib
+*.pkl
+
+# ======================
+# Logs
+# ======================
+logs/
+*.log
