@@ -1,18 +1,30 @@
-import hashlib
+import bcrypt
 import uuid
 
 def hash_password(password: str) -> str:
-    salt = uuid.uuid4().hex
-    hashed = hashlib.sha256((password + salt).encode()).hexdigest()
-    return f"{salt}${hashed}"
+    """
+    Hash password using bcrypt.
+    Stored format: bcrypt_hash (utf-8 string)
+    """
+    hashed = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt())
+    return hashed.decode("utf-8")
+
 
 def verify_password(password: str, password_hash: str) -> bool:
+    """
+    Verify password against bcrypt hash.
+    """
     try:
-        salt, hashed = password_hash.split("$")
-    except ValueError:
+        return bcrypt.checkpw(
+            password.encode("utf-8"),
+            password_hash.encode("utf-8")
+        )
+    except Exception:
         return False
-    check = hashlib.sha256((password + salt).encode()).hexdigest()
-    return check == hashed
+
 
 def make_token() -> str:
+    """
+    Generate random session/token id.
+    """
     return uuid.uuid4().hex

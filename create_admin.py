@@ -1,26 +1,45 @@
 # create_admin.py
+import os
 from db import init_db, SessionLocal, User
 from auth_utils import hash_password
-import os
+from dotenv import load_dotenv
+load_dotenv()
 
-# ensure tables exist
-init_db()
 
-session = SessionLocal()
-email = "ashishrai6387@gmail.com"
-password = "AshishAdmin123"  # change after login
+def main():
+    # Read from environment variables
+    admin_email = os.environ.get("ADMIN_EMAIL")
+    admin_password = os.environ.get("ADMIN_PASSWORD")
 
-u = session.query(User).filter(User.email == email).first()
-if u:
-    u.is_admin = True
-    session.commit()
-    print("Existing user promoted to admin:", email)
-else:
-    new = User(email=email, password_hash=hash_password(password), is_admin=True)
-    session.add(new)
-    session.commit()
-    print("Created new admin user.")
-    print("Email:", email)
-    print("Password:", password)
+    if not admin_email or not admin_password:
+        raise RuntimeError(
+            "ADMIN_EMAIL and ADMIN_PASSWORD environment variables must be set"
+        )
 
-session.close()
+    # Ensure tables exist
+    init_db()
+
+    session = SessionLocal()
+
+    try:
+        user = session.query(User).filter(User.email == admin_email).first()
+
+        if user:
+            print("Admin already exists:", admin_email)
+            return
+
+        user = User(
+            email=admin_email,
+            password_hash=hash_password(admin_password),
+            is_admin=True
+        )
+
+        session.add(user)
+        session.commit()
+        print("Admin user created:", admin_email)
+
+    finally:
+        session.close()
+
+if __name__ == "__main__":
+    main()
