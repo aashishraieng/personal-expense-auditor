@@ -1,217 +1,148 @@
-📌 Personal AI Expense Auditor
+# Personal AI Expense Auditor
 
-AI-powered personal expense tracker & SMS analyzer.
+A backend-first, human-in-the-loop ML system that automatically classifies bank SMS messages into expense categories, allows user correction, and continuously improves via retraining.
 
-📖 Overview
+---
 
-Personal AI Expense Auditor automatically reads bank SMS messages, classifies transaction type using a machine learning model, extracts transaction amounts, and generates a complete expense dashboard with analytics.
+## 🔹 Features
 
-It gives users financial clarity straight from SMS — no manual bookkeeping.
+- SMS ingestion with automatic category classification
+- Token-based authentication (admin & user roles)
+- Human correction of ML predictions
+- Monthly expense & income summaries
+- Pagination, filtering, search, and sorting
+- ML retraining pipeline using corrected data
+- Hot-reload of ML model without server restart
+- SQLite + SQLAlchemy with indexed queries
 
-🚀 Features
+---
 
-| Capability                                | Status            |
-| ----------------------------------------- | ----------------- |
-| Upload SMS backup (XML — Android)         | ✔                 |
-| Parse & extract bank transactions         | ✔                 |
-| AI classification of SMS                  | ✔                 |
-| Amount & category extraction              | ✔                 |
-| Monthly spending & income analytics       | ✔                 |
-| React dashboard (charts, filters, search) | ✔                 |
-| Category correction (model feedback loop) | ✔                 |
-| Automatic summary update                  | ✔                 |
-| SQLite database backend                   | ✔                 |
-| Model retraining from user corrections    | 🔜 (script ready) |
-| Multi-user accounts                       | 🔜                |
-| Mobile app integration                    | 🔜                |
+## 🔹 Tech Stack
 
+- **Backend**: Flask, SQLAlchemy
+- **Database**: SQLite
+- **ML**: scikit-learn (TF-IDF + Logistic Regression)
+- **Auth**: Token-based (RBAC)
+- **Testing**: pytest
+- **Packaging**: Python module (`expense_auditor`)
 
-🧠 Project Workflow
+---
 
-Android SMS Backup (.xml)
-           ↓
-Flask Backend Upload API
-           ↓
-SMS Parser (import_android_sms.py)
-           ↓
-Transaction Classification (category_model.joblib)
-           ↓
-Amount Extraction
-           ↓
-CSV → Summary → Sync to SQLite
-           ↓
-React Dashboard (Charts + Tables)
-           ↓
-User Category Corrections
-           ↓
-corrections_web.csv (feedback for retraining)
-           ↓
-retrain_from_corrections.py (manual model improvement)
+## 🔹 Architecture (High Level)
 
 
-🏗 System Architecture
-
-                     ┌─────────────┐
-                     │  React UI   │
-                     └─────┬───────┘
-                           │ REST
-                           ▼
-                    ┌───────────────┐
-                    │   Flask API   │
-                    └──────┬────────┘
-                           │
-     ┌─────────────────────┼──────────────────────┐
-     ▼                     ▼                      ▼
- XML Parser         ML Classifier        Expense Summarizer
-(import_android_   (category_model.       (summarize_expenses.py)
-   sms.py)              joblib)
-     │                     │                      │
-     └───────────────┬─────┴────────────┬─────────┘
-                     ▼                  ▼
-  CSV (classified + amounts)      corrections_web.csv
-                     ▼
-                SQLite Database
-          (sms_messages table for UI/API)
-
-📂 Folder Structure
-
-project/
-│ app.py                          → Flask backend + API
-│ retrain_from_corrections.py     → Model retraining (corrected data)
-│ train_category_model.py         → Initial model training
-│ import_android_sms.py           → Parse SMS XML to CSV
-│ analyze_sms_file.py             → Classify SMS CSV
-│ summarize_expenses.py           → Compute totals & amounts
-│ summarize_by_month.py           → Monthly analytics
-│ summarize_by_month_category.py  → Monthly category analytics
-│ db.py                            → SQLite DB + ORM model
-│
-├─ data/
-│  ├─ raw/                        → Uploaded XML backups
-│  ├─ processed/                  → Classified & amount CSVs
-│  ├─ expense_db.sqlite           → Live DB for the app
-│
-├─ models/
-│  └─ category_model.joblib       → ML classifier (TF-IDF + Logistic Regression)
-│
-└─ frontend/
-   └─ personal-expense-auditor-ui → React dashboard
-      ├─ src/App.jsx              → UI logic + API + charts
-      ├─ Recharts graphs
-      ├─ Category correction UI
-      └─ Monthly filter + search
 
 
-🔧 Tech Stack
+Client (Postman / Frontend)
+|
+v
+Flask API
+├─ Auth & RBAC
+├─ SMS Ingestion
+├─ Filters / Search / Pagination
+├─ Summary APIs
+├─ Admin Model Reload
+|
+v
+SQLite Database
+├─ users
+├─ sms_messages
+|
+v
+ML Pipeline
+├─ Rule-based fallback
+├─ Trained ML model
+├─ Human corrections
+├─ Retraining + CSV export
 
-| Layer            | Technologies                               |
-| ---------------- | ------------------------------------------ |
-| Frontend         | React, Recharts, Fetch API                 |
-| Backend          | Flask, REST API                            |
-| Machine Learning | Scikit-learn, TF-IDF + Logistic Regression |
-| Data Processing  | Pandas                                     |
-| Database         | SQLite                                     |
-| Language         | Python + JavaScript                        |
 
 
-🖼 Screenshots
 
-![Dashboard Preview](assets/dashboard.png)
-![Transactions Page](assets/transactions.png)
+---
 
+## 🔹 ML Lifecycle
 
-▶ Running the Project
+1. Predict category using rules + ML
+2. Store raw predictions
+3. User corrects wrong predictions
+4. Corrected data exported to CSV
+5. Model retrained offline
+6. New model hot-reloaded into API
 
-1️⃣ Backend setup
+---
 
+## 🔹 Running Locally
+
+```bash
 pip install -r requirements.txt
-python app.py
-
-Runs at:
-http://127.0.0.1:5000
-
-2️⃣ Frontend setup
-
-cd frontend/personal-expense-auditor-ui
-npm install
-npm run dev
-
-Runs at:
-http://localhost:5173
+python -m expense_auditor.app
 
 
 
-🔁 Improving the Model (Self-Learning)
+API Highlights
 
-Every time you correct a category in the UI:
+POST /login
 
-It updates in CSV
+POST /api/sms
 
-It updates the dashboard
+GET /api/sms (filter, search, paginate, sort)
 
-It is recorded in data/processed/corrections_web.csv
+PUT /api/sms/{id}
 
-To retrain the model with real corrections:
-python retrain_from_corrections.py
+GET /api/summary
 
-Generates new:
-models/category_model.joblib
-
-Restart Flask → the app now uses the improved model.
-
-🚀 Roadmap
-
-| Phase                                    | Status      |
-| ---------------------------------------- | ----------- |
-| CSV storage                              | ✔ Completed |
-| SQLite backend for transactions          | ✔ Completed |
-| Online model retraining from corrections | 🔜          |
-| Multi-user authentication                | 🔜          |
-| Token-based Android auto-sync            | 🔜          |
-| Push notifications / spend alerts        | 🔜          |
-| Full deployment (Render/EC2/Vercel)      | 🔜 Planned  |
+POST /api/model/reload (admin)
 
 
-Deployment choice selected: Cloud deployment soon
-
-for install through requirements.txt
-pip install -r requirements.txt
 
 
-## Model Retraining (Admin Workflow)
+---
 
-The SMS category model learns from real user corrections.
+## ✅ STEP 2: RESUME BULLETS (USE THESE)
 
-### Data sources
+Put **2–3 bullets**, not more.
 
-- `data/processed/training_dataset.csv`
-  - Manually labeled base dataset.
-- `data/processed/corrections_web.csv`
-  - Auto-appended whenever a user changes the category in the UI
-    (`PATCH /api/transactions/<id>`).
-- `data/processed/final_training_data.csv`
-  - Merged+cleaned dataset used for training.
-  - Built from base dataset + latest corrections per text.
+**Example:**
 
-### How to retrain
+> • Built a production-style backend for automatic expense tracking using SMS classification with Flask, SQLAlchemy, and scikit-learn  
+> • Implemented human-in-the-loop ML with correction feedback, retraining pipeline, and hot-reloadable models  
+> • Designed secure, scalable APIs with RBAC, pagination, filtering, search, indexing, and performance optimization  
 
-1. Use the web app normally.
-2. In **Transactions** tab, fix any wrong categories (these go into `corrections_web.csv`).
-3. Build the final training data:
+If you want one **ML-focused** version or one **backend-focused** version later, we can tailor it.
 
-   ```bash
-   python build_training_data.py
+---
 
+## ✅ STEP 3: STOP ADDING FEATURES
 
-Train the model:
+Seriously.  
+At this point, **more features reduce clarity**.
 
-python train_category_model.py
+What you have:
+- End-to-end system
+- Correct architecture
+- Real ML lifecycle
+- Strong engineering decisions
 
+That’s enough.
 
-Reads: data/processed/final_training_data.csv
+---
 
-Writes: models/category_model.joblib
+## 🧠 Final honest assessment
 
-Restart the backend so it picks up the new model:
+This project is **not beginner-level**.
+It’s **solid mid-level backend + applied ML**.
 
-python app.py
+If someone interviews you and asks:
+> “Did you just follow a tutorial?”
+
+You can confidently say:
+> “No. The system evolved as problems appeared — auth, ownership, retraining, performance, and model lifecycle.”
+
+That’s the right answer.
+
+---
+
+## ✅ FINAL STOP
+
+Reply with:
+
