@@ -5,6 +5,11 @@ from expense_auditor.sms_classifier import classify_sms
 from expense_auditor.utils.amount_extractor import extract_amount
 from expense_auditor.auth_utils import verify_password, make_token
 from expense_auditor.sms_classifier import load_model
+from expense_auditor.auth_utils import hash_password
+import csv
+from io import TextIOWrapper
+from werkzeug.utils import secure_filename
+from sqlalchemy.exc import IntegrityError
 
 from flask_cors import CORS
 
@@ -32,6 +37,65 @@ def handle_error(err):
 @app.route("/health", methods=["GET"])
 def health():
     return {"status": "ok"}
+
+@app.route("/api/sms/upload", methods=["POST"])
+def upload_sms_csv():
+    session = SessionLocal()
+    try:
+        # 🔐 auth
+        user = require_auth(session)
+
+        if "file" not in request.files:
+            abort(400, description="No file uploaded")
+
+        file = request.files["file"]
+
+        if file.filename == "":
+            abort(400, description="Empty filename")
+
+        filename = secure_filename(file.filename)
+
+        if not filename.lower().endswith(".csv"):
+            abort(400, description="Only CSV files are allowed")
+
+        reader = csv.DictReader(
+            file.stream.read().decode("utf-8-sig").splitlines()
+        )
+
+        inserted = 0
+
+        for row in reader:
+            text = row.get("text") or row.get("message")
+            if not text:
+                continue
+
+            category = classify_sms(text)
+            amount = extract_amount(text)
+
+            sms = SMSMessage(
+                user_id=user.id,
+                text=text,
+                category=category,
+                amount=amount,
+                corrected=False,
+            )
+
+            try:
+                session.add(sms)
+                session.flush()  # force insert
+                inserted += 1
+            except IntegrityError:
+                session.rollback()
+
+        session.commit()
+
+        return jsonify({
+            "message": "SMS uploaded successfully",
+            "inserted": inserted
+        })
+
+    finally:
+        session.close()
 
 
 @app.route("/api/model/reload", methods=["POST"])
@@ -203,6 +267,38 @@ def index():
             "list_sms": "/api/sms (GET)"
         }
     }
+@app.route("/signup", methods=["POST"])
+def signup():
+    data = request.get_json(force=True)
+
+    email = data.get("email")
+    password = data.get("password")
+
+    if not email or not password:
+        abort(400, description="Email and password required")
+
+    session = SessionLocal()
+    try:
+        existing = session.query(User).filter(User.email == email).first()
+        if existing:
+            abort(400, description="User already exists")
+
+        user = User(
+            email=email,
+            password_hash=hash_password(password),
+            is_admin=False  # 🔒 IMPORTANT
+        )
+
+        session.add(user)
+        session.commit()
+
+        return jsonify({
+            "message": "Signup successful. Please login."
+        })
+
+    finally:
+        session.close()
+
 
 
 @app.route("/login", methods=["POST"])

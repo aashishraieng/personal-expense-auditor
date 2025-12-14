@@ -3,9 +3,15 @@ const API_BASE = "http://127.0.0.1:5000";
 export async function apiRequest(path, options = {}) {
     const token = localStorage.getItem("token");
 
+    const defaultHeaders = {
+        ...(options.body instanceof FormData
+            ? {}
+            : { "Content-Type": "application/json" }),
+    };
+
     const res = await fetch(`${API_BASE}${path}`, {
         headers: {
-            "Content-Type": "application/json",
+            ...defaultHeaders,
             ...(token ? { Authorization: `Bearer ${token}` } : {}),
             ...(options.headers || {}),
         },

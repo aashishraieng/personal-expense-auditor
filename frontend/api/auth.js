@@ -6,3 +6,10 @@ export async function login(email, password) {
         body: JSON.stringify({ email, password }),
     });
 }
+
+export function signup(email, password) {
+    return apiRequest("/signup", {
+        method: "POST",
+        body: JSON.stringify({ email, password }),
+    });
+}

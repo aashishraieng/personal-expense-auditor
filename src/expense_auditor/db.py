@@ -15,6 +15,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import declarative_base, sessionmaker,relationship
 from datetime import datetime
 from sqlalchemy.sql import func
+from sqlalchemy import UniqueConstraint
 
 DB_PATH = os.path.join("data", "expense_db.sqlite")
 os.makedirs("data", exist_ok=True)
@@ -23,12 +24,11 @@ engine = create_engine(f"sqlite:///{DB_PATH}", echo=False)
 SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()
 
-
 class SMSMessage(Base):
     __tablename__ = "sms_messages"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    user_id = Column(Integer, nullable=True)  # NEW: owner of this SMS
+    user_id = Column(Integer, nullable=False)
     date = Column(DateTime, nullable=True)
     text = Column(String, nullable=False)
     amount = Column(Float, nullable=True)
@@ -37,6 +37,9 @@ class SMSMessage(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow)
 
+    __table_args__ = (
+        UniqueConstraint("user_id", "text", name="uq_user_sms_text"),
+    )
 class User(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True)

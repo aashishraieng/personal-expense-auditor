@@ -3,8 +3,11 @@ import AppLayout from "../layouts/AppLayout";
 import { fetchSMS, updateSMS } from "../api/sms";
 import { retrainModel } from "../api/admin";
 import { useAuth } from "../hooks/useAuth";
+import StatusBanner from "../src/components/StatusBanner";
 
-export default function Dashboard({ onLogout }) {
+export default function Dashboard({ onLogout, onOpenSettings }) {
+    const auth = useAuth();
+
     const [smsList, setSmsList] = useState([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState("");
@@ -12,10 +15,9 @@ export default function Dashboard({ onLogout }) {
     const [editingId, setEditingId] = useState(null);
     const [editCategory, setEditCategory] = useState("");
     const [editAmount, setEditAmount] = useState(0);
+
     const [retraining, setRetraining] = useState(false);
-
-    const auth = useAuth();
-
+    const [status, setStatus] = useState({ message: "", type: "success" });
 
     const CATEGORY_OPTIONS = [
         "Food",
@@ -27,24 +29,32 @@ export default function Dashboard({ onLogout }) {
         "Unknown",
     ];
 
+    const showStatus = (message, type = "success") => {
+        setStatus({ message, type });
+        setTimeout(() => setStatus({ message: "", type }), 3000);
+    };
+
     const resetEdit = () => {
         setEditingId(null);
         setEditCategory("");
         setEditAmount(0);
     };
 
-    useEffect(() => {
-        async function load() {
-            try {
-                const data = await fetchSMS();
-                setSmsList(data.items || data);
-            } catch (err) {
-                setError(err.message);
-            } finally {
-                setLoading(false);
-            }
+    const loadSMS = async () => {
+        try {
+            setLoading(true);
+            const data = await fetchSMS();
+            setSmsList(data.items || data);
+            setError("");
+        } catch (err) {
+            setError(err.message || "Failed to load transactions");
+        } finally {
+            setLoading(false);
         }
-        load();
+    };
+
+    useEffect(() => {
+        loadSMS();
     }, []);
 
     async function handleSave(smsId) {
@@ -54,31 +64,66 @@ export default function Dashboard({ onLogout }) {
                 amount: editAmount,
             });
 
-            // Optimistic UI update
-            setSmsList((prev) =>
-                prev.map((sms) =>
-                    sms.id === smsId
-                        ? { ...sms, category: editCategory, amount: editAmount }
-                        : sms
-                )
-            );
-
+            showStatus("Transaction updated successfully");
             resetEdit();
+            loadSMS();
         } catch (err) {
-            alert(err.message);
+            showStatus(err.message || "Failed to save changes", "error");
+        }
+    }
+
+    async function handleRetrain() {
+        try {
+            setRetraining(true);
+            await retrainModel();
+            showStatus("Model retrained successfully");
+            loadSMS();
+        } catch (err) {
+            showStatus(err.message || "Failed to retrain model", "error");
+        } finally {
+            setRetraining(false);
         }
     }
 
     return (
         <AppLayout>
+            <StatusBanner
+                message={status.message}
+                type={status.type}
+                onClose={() => setStatus({ message: "", type: "success" })}
+            />
+
+            {/* Header */}
             <div className="flex justify-between items-center mb-8">
                 <h2 className="text-3xl font-semibold">Dashboard</h2>
-                <button
-                    onClick={onLogout}
-                    className="bg-red-500/10 text-red-400 px-4 py-2 rounded-md hover:bg-red-500/20 transition"
-                >
-                    Logout
-                </button>
+
+                <div className="flex gap-3">
+                    {auth.isAdmin && (
+                        <button
+                            onClick={handleRetrain}
+                            disabled={retraining}
+                            className="bg-emerald-500/20 text-emerald-400 px-4 py-2 rounded
+              hover:bg-emerald-500/30 transition disabled:opacity-50"
+                        >
+                            {retraining ? "Retraining..." : "Retrain Model"}
+                        </button>
+                    )}
+
+                    <button
+                        onClick={onOpenSettings}
+                        className="text-slate-400 hover:text-white px-3 py-2"
+                    >
+                        Settings
+                    </button>
+
+                    <button
+                        onClick={onLogout}
+                        className="bg-red-500/10 text-red-400 px-4 py-2 rounded
+            hover:bg-red-500/20 transition"
+                    >
+                        Logout
+                    </button>
+                </div>
             </div>
 
             {loading && <div className="text-slate-400">Loading transactions...</div>}
@@ -86,26 +131,6 @@ export default function Dashboard({ onLogout }) {
 
             {!loading && !error && (
                 <div className="overflow-x-auto">
-                    {auth.isAdmin && (
-                        <button
-                            onClick={async () => {
-                                try {
-                                    setRetraining(true);
-                                    await retrainModel();
-                                    alert("Model retrained successfully");
-                                } catch (err) {
-                                    alert(err.message);
-                                } finally {
-                                    setRetraining(false);
-                                }
-                            }}
-                            disabled={retraining}
-                            className="bg-emerald-500/10 text-emerald-400 px-4 py-2 rounded-md hover:bg-emerald-500/20 transition disabled:opacity-50"
-                        >
-                            {retraining ? "Retraining..." : "Retrain Model"}
-                        </button>
-                    )}
-
                     <table className="w-full border border-slate-800 rounded-lg overflow-hidden">
                         <thead className="bg-slate-900 text-slate-400 text-sm">
                             <tr>

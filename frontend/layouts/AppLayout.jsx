@@ -15,6 +15,13 @@ export default function AppLayout({ children }) {
                     <div className="text-slate-300 hover:text-white cursor-pointer">
                         Summary
                     </div>
+                    <button
+                        onClick={() => setPage("settings")}
+                        className="text-slate-400 hover:text-white"
+                    >
+                        Settings
+                    </button>
+
                     <div className="text-slate-300 hover:text-red-400 cursor-pointer">
                         Logout
                     </div>

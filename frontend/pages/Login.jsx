@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { login } from "../api/auth";
 
-export default function Login({ onLogin }) {
+export default function Login({ onLogin, onSignup }) {
 
     const [email, setEmail] = useState("");
     const [password, setPassword] = useState("");
@@ -65,6 +65,14 @@ export default function Login({ onLogin }) {
                     >
                         {loading ? "Signing in..." : "Sign in"}
                     </button>
+                    <button
+                        type="button"
+                        onClick={onSignup}
+                        className="text-sm text-slate-400 hover:text-slate-300"
+                    >
+                        Create account
+                    </button>
+
 
                     {error && (
                         <div className="text-sm text-red-400">
