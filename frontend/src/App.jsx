@@ -1,44 +1,35 @@
-import { useState } from "react";
-import Login from "../pages/Login";
-import Signup from "../pages/Signup";
-import Dashboard from "../pages/Dashboard";
-import Settings from "../pages/Settings";
-import { useAuth } from "../hooks/useAuth";
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { useAuth } from "./context/AuthContext";
+import Login from "./pages/Login";
+import Signup from "./pages/Signup";
+import Dashboard from "./pages/Dashboard";
+import Summary from "./pages/Summary";
+import Settings from "./pages/Settings";
 
-function App() {
+
+export default function App() {
   const auth = useAuth();
-  const [showSignup, setShowSignup] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
 
   if (!auth.isAuthenticated) {
-    if (showSignup) {
-      return <Signup onBack={() => setShowSignup(false)} />;
-    }
-
     return (
-      <Login
-        onLogin={auth.login}
-        onSignup={() => setShowSignup(true)}
-      />
+      <BrowserRouter>
+        <Routes>
+          <Route path="/login" element={<Login />} />
+          <Route path="/signup" element={<Signup />} />
+          <Route path="*" element={<Navigate to="/login" />} />
+        </Routes>
+      </BrowserRouter>
     );
   }
-  if (showSettings) {
-    return (
-      <Settings
-        onBack={() => {
-          setShowSettings(false);
-        }}
-      />
-    );
-  }
-
 
   return (
-    <Dashboard
-      onLogout={auth.logout}
-      onOpenSettings={() => setShowSettings(true)}
-    />
+    <BrowserRouter>
+      <Routes>
+        <Route path="/" element={<Dashboard />} />
+        <Route path="/summary" element={<Summary />} />
+        <Route path="/settings" element={<Settings />} />
+        <Route path="*" element={<Navigate to="/" />} />
+      </Routes>
+    </BrowserRouter>
   );
 }
-
-export default App;

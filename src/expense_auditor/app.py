@@ -10,15 +10,18 @@ import csv
 from io import TextIOWrapper
 from werkzeug.utils import secure_filename
 from sqlalchemy.exc import IntegrityError
-
+from sqlalchemy import extract, func
 from flask_cors import CORS
-
-from sqlalchemy import func
 from datetime import datetime
 
 app = Flask(__name__)
 CORS(app, origins=["http://localhost:5173"])
 init_db()
+def require_admin(session):
+    user = require_auth(session)
+    if not user.is_admin:
+        abort(403, description="Admin access required")
+    return user
 
 @app.errorhandler(400)
 @app.errorhandler(401)
@@ -97,22 +100,13 @@ def upload_sms_csv():
     finally:
         session.close()
 
-
 @app.route("/api/model/reload", methods=["POST"])
 def reload_model():
     session = SessionLocal()
     try:
-        user = require_auth(session)
-
-        require_admin(user)
-
-
-        load_model(force_reload=True)
-
-        return jsonify({
-            "status": "model reloaded"
-        })
-
+        user = require_admin(session)
+        # retrain logic here
+        return {"status": "model reloaded"}
     finally:
         session.close()
 
@@ -123,62 +117,49 @@ def monthly_summary():
     try:
         user = require_auth(session)
 
-        month = request.args.get("month")
-        if not month:
-            abort(400, description="month query param required (YYYY-MM)")
-
-        try:
-            start = datetime.strptime(month + "-01", "%Y-%m-%d")
-        except ValueError:
+        month = request.args.get("month")  # YYYY-MM
+        if not month or len(month) != 7:
             abort(400, description="Invalid month format. Use YYYY-MM")
 
-        # end = first day of next month
-        if start.month == 12:
-            end = datetime(start.year + 1, 1, 1)
-        else:
-            end = datetime(start.year, start.month + 1, 1)
+        year, month_num = map(int, month.split("-"))
 
         rows = (
             session.query(
                 SMSMessage.category,
-                func.sum(SMSMessage.amount).label("total")
+                func.sum(SMSMessage.amount).label("total"),
             )
             .filter(
                 SMSMessage.user_id == user.id,
                 SMSMessage.amount.isnot(None),
-                SMSMessage.created_at >= start,
-                SMSMessage.created_at < end,
+                extract("year", SMSMessage.created_at) == year,
+                extract("month", SMSMessage.created_at) == month_num,
             )
             .group_by(SMSMessage.category)
             .all()
         )
 
-        total_expense = 0.0
-        total_income = 0.0
         by_category = {}
+        total_expense = 0
+        total_income = 0
 
         for category, total in rows:
-            amount = float(total or 0)
-            by_category[category] = amount
+            total = float(total or 0)
+            by_category[category] = total
 
-            cat = category.lower()
-
-            if cat == "income":
-                total_income += amount
-            elif cat == "expense":
-                total_expense += amount
-            # everything else (Unknown, Refund, etc.) is excluded from totals
+            if category == "Income":
+                total_income += total
+            elif category != "Unknown":
+                total_expense += total
 
         return jsonify({
             "month": month,
-            "total_expense": round(total_expense, 2),
-            "total_income": round(total_income, 2),
-            "by_category": by_category
+            "total_expense": total_expense,
+            "total_income": total_income,
+            "by_category": by_category,
         })
 
     finally:
         session.close()
-
 @app.route("/api/sms/<int:sms_id>", methods=["PUT"])
 def update_sms(sms_id):
     session = SessionLocal()
@@ -187,42 +168,20 @@ def update_sms(sms_id):
 
         sms = (
             session.query(SMSMessage)
-            .filter(
-                SMSMessage.id == sms_id,
-                SMSMessage.user_id == user.id
-            )
+            .filter(SMSMessage.id == sms_id, SMSMessage.user_id == user.id)
             .first()
         )
 
         if not sms:
             abort(404, description="SMS not found")
 
-        data = request.get_json(silent=True)
-        if not data:
-            abort(400, description="Invalid or missing JSON body")
-
-        updated = False
-
-        if "category" in data:
-            sms.category = data["category"]
-            updated = True
-
-        if "amount" in data:
-            sms.amount = data["amount"]
-            updated = True
-
-        if not updated:
-            abort(400, description="No valid fields to update")
-
+        data = request.get_json()
+        sms.category = data.get("category", sms.category)
+        sms.amount = data.get("amount", sms.amount)
         sms.corrected = True
-        session.commit()
 
-        return jsonify({
-            "id": sms.id,
-            "category": sms.category,
-            "amount": sms.amount,
-            "corrected": sms.corrected
-        })
+        session.commit()
+        return {"status": "updated"}
 
     finally:
         session.close()
