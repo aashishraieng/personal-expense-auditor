@@ -1,11 +1,15 @@
-import client from "./client";
+import { apiRequest } from "./client";
 
-export async function loginRequest(email, password) {
-    const res = await client.post("/login", { email, password });
-    return res.data;
+export function loginRequest(email, password) {
+    return apiRequest("/login", {
+        method: "POST",
+        body: JSON.stringify({ email, password }),
+    });
 }
 
-export async function signupRequest(email, password) {
-    const res = await client.post("/signup", { email, password });
-    return res.data;
+export function signupRequest(email, password) {
+    return apiRequest("/signup", {
+        method: "POST",
+        body: JSON.stringify({ email, password }),
+    });
 }

@@ -55,6 +55,19 @@ class User(Base):
 
 
 
+class UserSettings(Base):
+    __tablename__ = "user_settings"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), unique=True)
+
+    enable_confidence = Column(Boolean, default=False)
+    highlight_low_confidence = Column(Boolean, default=True)
+    confidence_threshold = Column(Float, default=0.7)
+    auto_retrain = Column(Boolean, default=False)
+
+    user = relationship("User", backref="settings")
+
 class Budget(Base):
     __tablename__ = "budgets"
 

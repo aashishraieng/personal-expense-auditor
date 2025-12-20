@@ -1,30 +1,26 @@
-import client from "./client";
-import apiRequest from "./client";
+import { apiRequest } from "./client";
 
-export async function fetchSMS() {
-    const res = await client.get("/api/sms");
-    return res.data;
+export function fetchSMS() {
+    return apiRequest("/api/sms");
 }
 
-export async function updateSMS(id, payload) {
-    const res = await client.put(`/api/sms/${id}`, payload);
-    return res.data;
+export function updateSMS(id, payload) {
+    return apiRequest(`/api/sms/${id}`, {
+        method: "PUT",
+        body: JSON.stringify(payload),
+    });
 }
 
-export async function uploadSMSFile(file) {
+export function uploadSMSFile(file) {
     const formData = new FormData();
     formData.append("file", file);
 
-    const res = await client.post("/api/sms/upload", formData);
-    return res.data;
+    return apiRequest("/api/sms/upload", {
+        method: "POST",
+        body: formData,
+    });
 }
 
-export async function getMonthlySummary(month) {
-    const res = await client.get(`/api/summary?month=${month}`);
-    return res.data;
-}
-
-
-export function fetchSummary(month) {
+export function getMonthlySummary(month) {
     return apiRequest(`/api/summary?month=${month}`);
 }

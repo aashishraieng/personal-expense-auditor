@@ -1,6 +1,7 @@
-import client from "./client";
+import { apiRequest } from "./client";
 
-export async function retrainModel() {
-    const res = await client.post("/api/model/reload");
-    return res.data;
+export function retrainModel() {
+    return apiRequest("/api/model/reload", {
+        method: "POST",
+    });
 }

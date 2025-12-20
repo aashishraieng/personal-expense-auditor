@@ -1,70 +1,94 @@
-import { useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import AppLayout from "../layouts/AppLayout";
-import { uploadSMSFile } from "../api/sms";
-import { retrainModel } from "../api/admin";
-import { useAuth } from "../context/AuthContext";
-
+import { getSettings, saveSettings } from "../api/settings";
 
 export default function Settings() {
-    const fileRef = useRef(null);
-    const auth = useAuth();
-    const [status, setStatus] = useState("");
+    const [settings, setSettings] = useState(null);
+    const [saving, setSaving] = useState(false);
 
-    async function handleUpload(e) {
-        const file = e.target.files[0];
-        if (!file) return;
+    useEffect(() => {
+        getSettings().then(setSettings);
+    }, []);
 
-        try {
-            await uploadSMSFile(file);
-            setStatus("CSV uploaded successfully");
-        } catch {
-            setStatus("Upload failed");
-        }
+    if (!settings) {
+        return <AppLayout>Loading settings…</AppLayout>;
     }
 
-    async function handleRetrain() {
-        try {
-            await retrainModel();
-            setStatus("Model retrained successfully");
-        } catch (err) {
-            if (err.response?.status === 403) {
-                setStatus("Admin access required");
-            } else {
-                setStatus("Retrain failed");
-            }
-        }
+    function update(key, value) {
+        setSettings({ ...settings, [key]: value });
     }
 
+    async function save() {
+        setSaving(true);
+        await saveSettings(settings);
+        setSaving(false);
+        alert("Settings saved");
+    }
 
     return (
         <AppLayout>
             <h2 className="text-2xl font-semibold mb-6">Settings</h2>
 
-            {status && <p className="mb-4 text-emerald-400">{status}</p>}
+            <div className="bg-slate-900 p-6 rounded-lg max-w-xl space-y-6">
 
-            <input
-                ref={fileRef}
-                type="file"
-                accept=".csv"
-                onChange={handleUpload}
-                className="hidden"
-            />
+                <h3 className="text-lg font-medium">Model Intelligence</h3>
 
-            <button
-                onClick={() => fileRef.current.click()}
-                className="bg-blue-500/20 text-blue-400 px-4 py-2 rounded mr-4"
-            >
-                Upload CSV
-            </button>
+                <label className="flex items-center gap-3">
+                    <input
+                        type="checkbox"
+                        checked={settings.enable_confidence}
+                        onChange={(e) => update("enable_confidence", e.target.checked)}
+                    />
+                    Enable confidence scoring
+                </label>
 
-            {auth.isAdmin && (
+                <label className="flex items-center gap-3">
+                    <input
+                        type="checkbox"
+                        checked={settings.highlight_low_confidence}
+                        onChange={(e) =>
+                            update("highlight_low_confidence", e.target.checked)
+                        }
+                        disabled={!settings.enable_confidence}
+                    />
+                    Highlight low-confidence predictions
+                </label>
+
+                <div>
+                    <label className="block text-sm mb-1">
+                        Confidence threshold ({settings.confidence_threshold})
+                    </label>
+                    <input
+                        type="range"
+                        min="0.4"
+                        max="0.9"
+                        step="0.05"
+                        value={settings.confidence_threshold}
+                        onChange={(e) =>
+                            update("confidence_threshold", Number(e.target.value))
+                        }
+                        disabled={!settings.enable_confidence}
+                        className="w-full"
+                    />
+                </div>
+
+                <label className="flex items-center gap-3 opacity-60">
+                    <input
+                        type="checkbox"
+                        checked={settings.auto_retrain}
+                        disabled
+                    />
+                    Auto retrain on corrections (coming soon)
+                </label>
+
                 <button
-                    onClick={handleRetrain}
-                    className="bg-emerald-500/20 text-emerald-400 px-4 py-2 rounded"
+                    onClick={save}
+                    disabled={saving}
+                    className="bg-sky-500/20 text-sky-400 px-4 py-2 rounded"
                 >
-                    Retrain Model
+                    {saving ? "Saving…" : "Save Settings"}
                 </button>
-            )}
+            </div>
         </AppLayout>
     );
 }

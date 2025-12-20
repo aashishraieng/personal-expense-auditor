@@ -6,6 +6,7 @@ from expense_auditor.utils.amount_extractor import extract_amount
 from expense_auditor.auth_utils import verify_password, make_token
 from expense_auditor.sms_classifier import load_model
 from expense_auditor.auth_utils import hash_password
+from expense_auditor.db import UserSettings
 import csv
 from io import TextIOWrapper
 from werkzeug.utils import secure_filename
@@ -186,6 +187,34 @@ def update_sms(sms_id):
     finally:
         session.close()
 
+@app.route("/api/settings", methods=["GET", "PUT"])
+def user_settings():
+    session = SessionLocal()
+    user = require_auth(session)
+
+    settings = session.query(UserSettings).filter_by(user_id=user.id).first()
+    if not settings:
+        settings = UserSettings(user_id=user.id)
+        session.add(settings)
+        session.commit()
+
+    if request.method == "GET":
+        return jsonify({
+            "enable_confidence": settings.enable_confidence,
+            "highlight_low_confidence": settings.highlight_low_confidence,
+            "confidence_threshold": settings.confidence_threshold,
+            "auto_retrain": settings.auto_retrain,
+        })
+
+    data = request.get_json()
+
+    settings.enable_confidence = data.get("enable_confidence", settings.enable_confidence)
+    settings.highlight_low_confidence = data.get("highlight_low_confidence", settings.highlight_low_confidence)
+    settings.confidence_threshold = data.get("confidence_threshold", settings.confidence_threshold)
+    settings.auto_retrain = data.get("auto_retrain", settings.auto_retrain)
+
+    session.commit()
+    return jsonify({"status": "saved"})
 
         
 @app.route("/api/export/corrections", methods=["GET"])
@@ -312,9 +341,12 @@ def require_auth(session):
 
     return user
 
-def require_admin(user):
+def require_admin(session):
+    user = require_auth(session)
     if not user.is_admin:
         abort(403, description="Admin access required")
+    return user
+
 
 # -----------------------
 # Protected APIs
