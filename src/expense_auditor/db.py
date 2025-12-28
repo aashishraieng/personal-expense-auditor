@@ -34,11 +34,13 @@ class SMSMessage(Base):
     amount = Column(Float, nullable=True)
     category = Column(String, nullable=False)
     corrected = Column(Boolean, default=False)
+    confidence = Column(Float, nullable=True)          
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow)
+    
 
     __table_args__ = (
-        UniqueConstraint("user_id", "text", name="uq_user_sms_text"),
+        UniqueConstraint("user_id", "text", "amount", name="uq_user_sms"),
     )
 class User(Base):
     __tablename__ = "users"

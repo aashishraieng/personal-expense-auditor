@@ -1,7 +1,7 @@
 # src/expense_auditor/app.py
 from flask import Flask, request, jsonify, abort
 from expense_auditor.db import init_db, SessionLocal, SMSMessage, User
-from expense_auditor.sms_classifier import classify_sms
+from expense_auditor.sms_classifier import classify_sms_with_confidence
 from expense_auditor.utils.amount_extractor import extract_amount
 from expense_auditor.auth_utils import verify_password, make_token
 from expense_auditor.sms_classifier import load_model
@@ -13,10 +13,18 @@ from werkzeug.utils import secure_filename
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy import extract, func
 from flask_cors import CORS
+
 from datetime import datetime
 
 app = Flask(__name__)
-CORS(app, origins=["http://localhost:5173"])
+
+CORS(
+    app,
+    resources={r"/*": {"origins": "http://localhost:5173"}},
+    allow_headers=["Authorization", "Content-Type"],
+    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+)
+
 init_db()
 def require_admin(session):
     user = require_auth(session)
@@ -37,6 +45,22 @@ def handle_error(err):
 # -----------------------
 # Public routes
 # -----------------------
+@app.route("/api/model/status", methods=["GET"])
+def model_status():
+    session = SessionLocal()
+    try:
+        user = require_auth(session)
+        if not user.is_admin:
+            abort(403, description="Admin access required")
+
+        return jsonify({
+            "model_version": "v1",
+            "last_trained_at": None,
+            "training_samples": None,
+            "accuracy": None
+        })
+    finally:
+        session.close()
 
 @app.route("/health", methods=["GET"])
 def health():
@@ -46,60 +70,89 @@ def health():
 def upload_sms_csv():
     session = SessionLocal()
     try:
-        # 🔐 auth
         user = require_auth(session)
 
         if "file" not in request.files:
-            abort(400, description="No file uploaded")
+            abort(400, description="CSV file required")
 
         file = request.files["file"]
+        if not file.filename.endswith(".csv"):
+            abort(400, description="Only CSV files allowed")
 
-        if file.filename == "":
-            abort(400, description="Empty filename")
+        import csv
+        from io import TextIOWrapper
+        from dateutil.parser import parse as parse_date
 
-        filename = secure_filename(file.filename)
-
-        if not filename.lower().endswith(".csv"):
-            abort(400, description="Only CSV files are allowed")
-
-        reader = csv.DictReader(
-            file.stream.read().decode("utf-8-sig").splitlines()
-        )
+        try:
+            # Detect encoding? default utf-8 usually fine for generated files
+            reader = csv.DictReader(TextIOWrapper(file, encoding="utf-8"))
+        except Exception:
+            abort(400, description="Invalid CSV format")
 
         inserted = 0
+        skipped = 0
 
         for row in reader:
-            text = row.get("text") or row.get("message")
+            # Normalize column names
+            text = row.get("text") or row.get("source_text") or row.get("body")
             if not text:
+                skipped += 1
                 continue
 
-            category = classify_sms(text)
-            amount = extract_amount(text)
+            # Amount logic
+            amount = row.get("amount")
+            if amount and str(amount).strip():
+                try:
+                    amount = float(amount)
+                except ValueError:
+                    amount = extract_amount(text)
+            else:
+                amount = extract_amount(text)
 
+            # Date logic
+            date_str = row.get("date") or row.get("created_at")
+            sms_date = None
+            if date_str:
+                try:
+                    sms_date = parse_date(date_str)
+                except Exception:
+                    sms_date = datetime.utcnow() # Fallback if unparseable
+            
+            # Category logic
+            category = row.get("category") or row.get("probable_category") or "Unknown"
+
+            # Create object
             sms = SMSMessage(
                 user_id=user.id,
-                text=text,
-                category=category,
+                text=text.strip(),
                 amount=amount,
+                category=category,
                 corrected=False,
+                created_at=sms_date if sms_date else datetime.utcnow()
             )
 
             try:
                 session.add(sms)
-                session.flush()  # force insert
+                session.flush()        # try insert
                 inserted += 1
             except IntegrityError:
+                session.rollback()     # rollback only failed row
+                skipped += 1
+            except Exception as e:
+                # Catch other errors per row to continue processing
                 session.rollback()
+                skipped += 1
 
-        session.commit()
+        session.commit()  # Commit all successful inserts
 
         return jsonify({
-            "message": "SMS uploaded successfully",
-            "inserted": inserted
+            "inserted": inserted,
+            "skipped": skipped
         })
 
     finally:
         session.close()
+
 
 @app.route("/api/model/reload", methods=["POST"])
 def reload_model():
@@ -364,16 +417,19 @@ def ingest_sms():
         if not text:
             abort(400, description="SMS text is required")
 
-        category = classify_sms(text)
+        category, confidence = classify_sms_with_confidence(text)
+
         amount = extract_amount(text)
 
         sms = SMSMessage(
-            user_id=user.id,
-            text=text,
-            amount=amount,
-            category=category,
-            corrected=False,
-        )
+    user_id=user.id,
+    text=text,
+    amount=amount,
+    category=category,
+    confidence=confidence,
+    corrected=False,
+)
+
 
         session.add(sms)
         session.commit()

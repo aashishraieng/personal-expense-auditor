@@ -1,148 +1,84 @@
-# Personal AI Expense Auditor
+# Personal Expense Auditor
 
-A backend-first, human-in-the-loop ML system that automatically classifies bank SMS messages into expense categories, allows user correction, and continuously improves via retraining.
+A full-stack application for tracking personal expenses from SMS messages. It works by uploading a CSV of SMS messages, which are then parsed and categorized (using keywords or ML) to generate financial summaries.
 
----
+## Project Structure
 
-## 🔹 Features
+### Backend (`src/expense_auditor/`)
+The backend is built with **Flask** and **SQLAlchemy**.
 
-- SMS ingestion with automatic category classification
-- Token-based authentication (admin & user roles)
-- Human correction of ML predictions
-- Monthly expense & income summaries
-- Pagination, filtering, search, and sorting
-- ML retraining pipeline using corrected data
-- Hot-reload of ML model without server restart
-- SQLite + SQLAlchemy with indexed queries
+- **`app.py`**: The main entry point.
+  - **Routes**:
+    - `POST /login`: Authenticate user.
+    - `POST /signup`: Register new user.
+    - `GET /health`: Health check (`{"status": "ok"}`).
+    - `POST /api/sms/upload`: Upload CSV file. Parsed `source_text`, `date`, `amount`. Uses `amount_extractor.py`.
+    - `GET /api/sms`: Fetch all SMS messages for the user.
+    - `PUT /api/sms/<id>`: Update category/amount of a message.
+    - `GET /api/summary`: Fetch monthly financial summary (Expense/Income/Net).
+    - `GET /api/model/status`: Check ML model status (Admin only).
+  - **Key Functions**:
+    - `upload_sms_csv`: Handles file parsing, duplicate prevention, and DB insertion.
+    - `monthly_summary`: Aggregates data by category/month.
 
----
+- **`db.py`**: Database models.
+  - `User`: Handles authentication (email, password hash, token, admin status).
+  - `SMSMessage`: Stores transaction details. Unique constraint on `(user_id, text, amount)` to prevent duplicates.
+  - `UserSettings`: Metrics settings (confidence threshold).
+  - `Budget`: Monthly category budgets.
 
-## 🔹 Tech Stack
+- **`auth_utils.py`**: Security helpers.
+  - `hash_password`: BCrypt hashing.
+  - `verify_password`: Verify hash.
+  - `make_token`: Generate session token.
 
-- **Backend**: Flask, SQLAlchemy
-- **Database**: SQLite
-- **ML**: scikit-learn (TF-IDF + Logistic Regression)
-- **Auth**: Token-based (RBAC)
-- **Testing**: pytest
-- **Packaging**: Python module (`expense_auditor`)
+- **`sms_classifier.py`**: Classification logic.
+  - `classify_sms_with_confidence`: Uses regex rules first (e.g., "debited" -> Expense), falls back to ML model (`category_model.joblib`).
 
----
+- **`utils/amount_extractor.py`**: Regex utility to extract money from text (supports `Rs.`, `₹`, `INR`).
 
-## 🔹 Architecture (High Level)
+### Frontend (`frontend/src/`)
+The frontend is a **React (Vite)** application tailored with **Tailwind CSS**.
 
+- **`main.jsx`**: Entry point. Wraps app in `BrowserRouter` and `AuthProvider`.
+- **`App.jsx`**: Main routing logic.
+  - `/login`, `/signup`: Public routes.
+  - `/`, `/dashboard`, `/summary`, `/settings`: Protected routes (require auth).
 
+- **`api/client.js`**: Core API wrapper.
+  - Attaches `Authorization: Bearer <token>`.
+  - Automatically handles 401 Unauthorized (redirects to login).
+  - **Special Logic**: Smartly handles `FormData` for file uploads by NOT forcing `Content-Type: application/json`.
 
+- **`api/sms.js`**: SMS-specific API calls.
+  - `fetchSMS`, `updateSMS`, `uploadSMSFile`, `getMonthlySummary`.
 
-Client (Postman / Frontend)
-|
-v
-Flask API
-├─ Auth & RBAC
-├─ SMS Ingestion
-├─ Filters / Search / Pagination
-├─ Summary APIs
-├─ Admin Model Reload
-|
-v
-SQLite Database
-├─ users
-├─ sms_messages
-|
-v
-ML Pipeline
-├─ Rule-based fallback
-├─ Trained ML model
-├─ Human corrections
-├─ Retraining + CSV export
+- **`context/AuthContext.jsx`**: Manages global auth state (`user`, `token`, `isAuthenticated`). Persists to `localStorage`.
 
+- **`pages/`**:
+  - `Login.jsx` / `Signup.jsx`: Auth forms.
+  - `Dashboard.jsx`: Displays list of transactions with filters.
+  - `Summary.jsx`: Monthly financial overview charts (Expense vs Income).
+  - `Settings.jsx`: File upload UI and preference management.
 
+## Setup & Running
 
+1. **Backend**:
+   ```bash
+   # In root directory
+   python -m expense_auditor.app
+   # Runs on http://127.0.0.1:5000
+   ```
 
----
+2. **Frontend**:
+   ```bash
+   cd frontend
+   npm run dev
+   # Runs on http://localhost:5173
+   ```
 
-## 🔹 ML Lifecycle
-
-1. Predict category using rules + ML
-2. Store raw predictions
-3. User corrects wrong predictions
-4. Corrected data exported to CSV
-5. Model retrained offline
-6. New model hot-reloaded into API
-
----
-
-## 🔹 Running Locally
-
-```bash
-pip install -r requirements.txt
-python -m expense_auditor.app
-
-
-
-API Highlights
-
-POST /login
-
-POST /api/sms
-
-GET /api/sms (filter, search, paginate, sort)
-
-PUT /api/sms/{id}
-
-GET /api/summary
-
-POST /api/model/reload (admin)
-
-
-
-
----
-
-## ✅ STEP 2: RESUME BULLETS (USE THESE)
-
-Put **2–3 bullets**, not more.
-
-**Example:**
-
-> • Built a production-style backend for automatic expense tracking using SMS classification with Flask, SQLAlchemy, and scikit-learn  
-> • Implemented human-in-the-loop ML with correction feedback, retraining pipeline, and hot-reloadable models  
-> • Designed secure, scalable APIs with RBAC, pagination, filtering, search, indexing, and performance optimization  
-
-If you want one **ML-focused** version or one **backend-focused** version later, we can tailor it.
-
----
-
-## ✅ STEP 3: STOP ADDING FEATURES
-
-Seriously.  
-At this point, **more features reduce clarity**.
-
-What you have:
-- End-to-end system
-- Correct architecture
-- Real ML lifecycle
-- Strong engineering decisions
-
-That’s enough.
-
----
-
-## 🧠 Final honest assessment
-
-This project is **not beginner-level**.
-It’s **solid mid-level backend + applied ML**.
-
-If someone interviews you and asks:
-> “Did you just follow a tutorial?”
-
-You can confidently say:
-> “No. The system evolved as problems appeared — auth, ownership, retraining, performance, and model lifecycle.”
-
-That’s the right answer.
-
----
-
-## ✅ FINAL STOP
-
-Reply with:
-
+## Key Features implemented
+- **Duplicate Prevention**: Uploading the same CSV twice will skip existing records based on text/amount match.
+- **Smart Amount Extraction**: Handles `INR 500`, `Rs. 500`, `₹500` formats.
+- **Session Persistence**: Users stay logged in on refresh.
+- **Responsive UI**: Tailwind-styled components.

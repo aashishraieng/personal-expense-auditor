@@ -3,8 +3,8 @@ import re
 from typing import Optional
 
 AMOUNT_PATTERNS = [
-    r"(?:rs\.?|₹)\s?([\d,]+(?:\.\d{1,2})?)",
-    r"([\d,]+(?:\.\d{1,2})?)\s?(?:rs\.?|₹)",
+    r"(?:rs\.?|₹|INR)\s?([\d,]+(?:\.\d{1,2})?)",
+    r"([\d,]+(?:\.\d{1,2})?)\s?(?:rs\.?|₹|INR)",
 ]
 
 

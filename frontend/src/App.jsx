@@ -1,35 +1,33 @@
-import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
-import { useAuth } from "./context/AuthContext";
-import Login from "./pages/Login";
-import Signup from "./pages/Signup";
+import { Routes, Route, Navigate } from "react-router-dom";
 import Dashboard from "./pages/Dashboard";
 import Summary from "./pages/Summary";
 import Settings from "./pages/Settings";
-
+import AdminModel from "./pages/AdminModel";
+import Login from "./pages/Login";
+import { useAuth } from "./hooks/useAuth";
 
 export default function App() {
   const auth = useAuth();
 
   if (!auth.isAuthenticated) {
-    return (
-      <BrowserRouter>
-        <Routes>
-          <Route path="/login" element={<Login />} />
-          <Route path="/signup" element={<Signup />} />
-          <Route path="*" element={<Navigate to="/login" />} />
-        </Routes>
-      </BrowserRouter>
-    );
+    return <Login />;
   }
 
   return (
-    <BrowserRouter>
-      <Routes>
-        <Route path="/" element={<Dashboard />} />
-        <Route path="/summary" element={<Summary />} />
-        <Route path="/settings" element={<Settings />} />
-        <Route path="*" element={<Navigate to="/" />} />
-      </Routes>
-    </BrowserRouter>
+    <Routes>
+      <Route path="/" element={<Navigate to="/dashboard" />} />
+
+      <Route path="/dashboard" element={<Dashboard />} />
+      <Route path="/summary" element={<Summary />} />
+      <Route path="/settings" element={<Settings />} />
+
+      {/* ADMIN ONLY */}
+      {auth.isAdmin && (
+        <Route path="/admin/model" element={<AdminModel />} />
+      )}
+
+      {/* fallback */}
+      <Route path="*" element={<Navigate to="/dashboard" />} />
+    </Routes>
   );
 }
