@@ -40,7 +40,50 @@ def require_auth(session):
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok"})
+# Add this route to app.py
+@app.route("/api/auth/signup", methods=["POST", "OPTIONS"])
+def signup():
+    if request.method == "OPTIONS": return jsonify({}), 200
+    
+    data = request.get_json()
+    email = data.get("email")
+    password = data.get("password")
+    name = data.get("name", "User")
 
+    if not email or not password:
+        return jsonify({"error": "Email and password required"}), 400
+
+    session = SessionLocal()
+    try:
+        # Check if user already exists
+        existing = session.query(User).filter_by(email=email).first()
+        if existing:
+            return jsonify({"error": "Email already registered"}), 409
+
+        # Create new user
+        new_user = User(
+            email=email,
+            password_hash=hash_password(password), # Uses your auth_utils
+            token=make_token(),
+            is_admin=False # Default to standard user
+        )
+        session.add(new_user)
+        session.flush() # Get user ID
+
+        # Create default settings for the new user
+        default_settings = UserSettings(user_id=new_user.id)
+        session.add(default_settings)
+        
+        session.commit()
+        return jsonify({
+            "token": new_user.token,
+            "message": "Account created successfully"
+        }), 201
+    except Exception as e:
+        session.rollback()
+        return jsonify({"error": str(e)}), 500
+    finally:
+        session.close()
 @app.route("/login", methods=["POST", "OPTIONS"])
 def login():
     if request.method == "OPTIONS": return jsonify({}), 200
