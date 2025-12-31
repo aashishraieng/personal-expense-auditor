@@ -1,47 +1,59 @@
-# src/expense_auditor/train_classifier.py
 import os
 import pandas as pd
 from sklearn.pipeline import Pipeline
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from joblib import dump
+from expense_auditor.db import SessionLocal, SMSMessage
 
-DATA_PATH = os.path.join("data", "corrections_train.csv")
 MODEL_PATH = os.path.join("models", "category_model.joblib")
 
+def train_and_save():
+    session = SessionLocal()
+    try:
+        # 1. Fetch all data from DB to train (including manual corrections)
+        messages = session.query(SMSMessage).all()
+        
+        if not messages:
+            print("No data in database to train on.")
+            return False
 
-def main():
-    if not os.path.exists(DATA_PATH):
-        raise RuntimeError("No training data found. Run export_corrections_csv first.")
+        # Convert to DataFrame
+        data = [{
+            "text": m.text,
+            "category": m.category
+        } for m in messages]
+        
+        df = pd.DataFrame(data)
 
-    df = pd.read_csv(DATA_PATH)
+        # 2. ML Pipeline
+        X = df["text"]
+        y = df["category"]
 
-    if df.empty:
-        raise RuntimeError("Training dataset is empty.")
+        pipeline = Pipeline([
+            ("tfidf", TfidfVectorizer(ngram_range=(1, 2), stop_words="english")),
+            ("clf", LogisticRegression(max_iter=1000, class_weight="balanced")),
+        ])
 
-    X = df["text"]
-    y = df["category"]
+        pipeline.fit(X, y)
 
-    pipeline = Pipeline([
-        ("tfidf", TfidfVectorizer(
-            ngram_range=(1, 2),
-            stop_words="english",
-            min_df=1
-        )),
-        ("clf", LogisticRegression(
-            max_iter=1000,
-            class_weight="balanced"
-        )),
-    ])
+        # 3. Save Model
+        os.makedirs("models", exist_ok=True)
+        dump(pipeline, MODEL_PATH)
 
-    pipeline.fit(X, y)
+        # 4. Reset 'corrected' flags in DB
+        # This makes the "New corrections" count on the dashboard go to 0
+        session.query(SMSMessage).filter(SMSMessage.corrected == True).update({"corrected": False})
+        session.commit()
 
-    os.makedirs("models", exist_ok=True)
-    dump(pipeline, MODEL_PATH)
-
-    print(f"Model trained and saved to {MODEL_PATH}")
-    print("Classes:", pipeline.named_steps["clf"].classes_)
-
+        print(f"Model retrained and saved to {MODEL_PATH}")
+        return True
+    except Exception as e:
+        print(f"Training error: {e}")
+        session.rollback()
+        return False
+    finally:
+        session.close()
 
 if __name__ == "__main__":
-    main()
+    train_and_save()

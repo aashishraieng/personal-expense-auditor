@@ -2,9 +2,10 @@ import { apiRequest } from "./client";
 
 /**
  * Trigger model retraining (ADMIN)
+ * Updated to match the '/api/model/reload' route in app.py
  */
 export function retrainModel() {
-    return apiRequest("/api/model/retrain", {
+    return apiRequest("/api/model/reload", {
         method: "POST",
     });
 }
